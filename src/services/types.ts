@@ -1,0 +1,6 @@
+export type Role = "user" | "admin";
+export interface User { id: number; email: string; name: string; city: string; zip: string; bio: string; role: Role; banned: number; created_at: string }
+export interface Listing { id: number; seller_id: number; title: string; description: string; price_cents: number; category: string; condition: string; quantity: number; city: string; zip: string; image: string | null; status: "active" | "removed"; flag_count: number; created_at: string; updated_at: string; seller_name?: string; distance?: number | null }
+export interface Offer { id: number; listing_id: number; buyer_id: number; amount_cents: number; quantity: number; status: string; created_at: string }
+export interface Order { id: number; listing_id: number; buyer_id: number; seller_id: number; offer_id: number | null; quantity: number; unit_price_cents: number; discount_cents: number; total_cents: number; promo_code: string | null; status: string; created_at: string }
+export interface Promotion { id: number; code: string; title: string; percent_off: number; seller_id: number | null; listing_id: number | null; category: string | null; max_uses: number | null; uses: number; expires_at: string | null; active: number }

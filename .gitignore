@@ -1,0 +1,11 @@
+node_modules
+.next
+*.db
+*.db-*
+data/
+.env
+uploads/
+public/uploads/
+test-results/
+playwright-report/
+next-env.d.ts
