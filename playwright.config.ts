@@ -1,5 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
-const env = "DATABASE_PATH=./data/e2e.db UPLOAD_DIR=./data/e2e-uploads INSECURE_COOKIES=1";
+const env = "DATABASE_PATH=./data/e2e.db UPLOAD_DIR=./data/e2e-uploads INSECURE_COOKIES=1 LOGIN_RATE_LIMIT=100 REGISTER_RATE_LIMIT=100";
 export default defineConfig({
   testDir: "tests/e2e",
   workers: 1,
