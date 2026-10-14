@@ -14,12 +14,12 @@ export function createPromotion(user: User, input: unknown): Promotion {
   const sellerId = user.role === "admin" && !d.listingId ? null : user.id;
   const db = getDb();
   if (db.prepare("SELECT 1 FROM promotions WHERE code = ?").get(d.code)) throw badRequest("Code already exists");
-  const r = db.prepare(`INSERT INTO promotions (code, title, percent_off, seller_id, listing_id, category, max_uses, expires_at) VALUES (?,?,?,?,?,?,?,?)`)
-    .run(d.code, d.title, d.percentOff, sellerId, d.listingId ?? null, d.category ?? null, d.maxUses ?? null, d.expiresAt ?? null);
+  const r = db.prepare(`INSERT INTO promotions (code, title, percent_off, seller_id, listing_id, category, max_uses, per_user_limit, expires_at) VALUES (?,?,?,?,?,?,?,?,?)`)
+    .run(d.code, d.title, d.percentOff, sellerId, d.listingId ?? null, d.category ?? null, d.maxUses ?? null, d.perUserLimit === 0 ? null : d.perUserLimit, d.expiresAt ?? null);
   return db.prepare("SELECT * FROM promotions WHERE id = ?").get(r.lastInsertRowid) as Promotion;
 }
 
-export function resolvePromo(code: string, l: Listing): Promotion {
+export function resolvePromo(code: string, l: Listing, buyerId?: number): Promotion {
   const p = getDb().prepare("SELECT * FROM promotions WHERE code = ?").get(code.trim()) as Promotion | undefined;
   if (!p || !p.active) throw badRequest("Invalid promo code");
   if (p.expires_at && p.expires_at < new Date().toISOString().slice(0, 10)) throw badRequest("Promo code expired");
@@ -27,12 +27,16 @@ export function resolvePromo(code: string, l: Listing): Promotion {
   if (p.seller_id != null && p.seller_id !== l.seller_id) throw badRequest("Promo code not valid for this seller");
   if (p.listing_id != null && p.listing_id !== l.id) throw badRequest("Promo code not valid for this listing");
   if (p.category && p.category !== l.category) throw badRequest("Promo code not valid for this category");
+  if (buyerId != null && p.per_user_limit != null) {
+    const used = (getDb().prepare("SELECT COUNT(*) AS n FROM orders WHERE buyer_id = ? AND promo_code = ? AND status != 'cancelled'").get(buyerId, p.code) as { n: number }).n;
+    if (used >= p.per_user_limit) throw badRequest("You have already used this promo code");
+  }
   return p;
 }
 
-export function quotePromo(code: string, listingId: number, qty = 1) {
+export function quotePromo(code: string, listingId: number, qty = 1, buyerId?: number) {
   const l = getListing(listingId);
-  const p = resolvePromo(code, l);
+  const p = resolvePromo(code, l, buyerId);
   const subtotal = l.price_cents * qty;
   const discount = Math.round((subtotal * p.percent_off) / 100);
   return { code: p.code, percentOff: p.percent_off, subtotal, discount, total: subtotal - discount };

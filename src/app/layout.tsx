@@ -27,7 +27,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
               <Link href="/offers">Offers</Link>
               <Link href="/profile">{user.name}</Link>
               {user.role === "admin" && <Link href="/admin">Admin</Link>}
-              <ApiForm action="/api/auth/logout" redirectTo="/" className="inline"><button className="link">Logout</button></ApiForm>
+              <ApiForm action="/api/auth/logout" redirectTo="/" className="inline" clearCaches><button className="link">Logout</button></ApiForm>
             </>) : (<><Link href="/login">Login</Link><Link href="/register">Register</Link></>)}
           </nav>
         </header>

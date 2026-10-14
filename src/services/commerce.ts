@@ -37,7 +37,18 @@ export function transitionOffer(user: User, id: number, action: string): Offer {
   const actorOk = t.by === "seller" ? l.seller_id === user.id : o.buyer_id === user.id;
   if (!actorOk) throw forbidden(`Only the ${t.by} can ${action} this offer`);
   if (!t.from.includes(o.status)) throw conflict(`Cannot ${action} an offer that is ${o.status}`);
-  getDb().prepare("UPDATE offers SET status = ? WHERE id = ?").run(OFFER_RESULT[action], id);
+  const db = getDb();
+  db.transaction(() => {
+    if (action === "accept") {
+      if (l.status !== "active") throw conflict("Listing is no longer available");
+      // Reserve stock at acceptance so two accepted offers can't both claim the last unit.
+      const dec = db.prepare("UPDATE listings SET quantity = quantity - ? WHERE id = ? AND quantity >= ?").run(o.quantity, l.id, o.quantity);
+      if (!dec.changes) throw conflict("Not enough inventory to accept this offer");
+    } else if (action === "withdraw" && o.status === "accepted") {
+      db.prepare("UPDATE listings SET quantity = quantity + ? WHERE id = ?").run(o.quantity, l.id);
+    }
+    db.prepare("UPDATE offers SET status = ? WHERE id = ?").run(OFFER_RESULT[action], id);
+  })();
   return getOffer(id);
 }
 
@@ -84,17 +95,20 @@ export function createOrder(user: User, input: unknown): Order {
     const l = getListing(listingId);
     if (l.status !== "active") throw badRequest("Listing not available");
     if (l.seller_id === user.id) throw forbidden("Cannot buy your own listing");
-    if (qty > l.quantity) throw conflict("Not enough inventory");
+    // Stock for accepted offers was already reserved at acceptance.
+    if (!offerId && qty > l.quantity) throw conflict("Not enough inventory");
     const subtotal = unit * qty;
     if (!("offerId" in d) && d.promoCode) {
-      const p = resolvePromo(d.promoCode, l);
+      const p = resolvePromo(d.promoCode, l, user.id);
       discount = Math.round((subtotal * p.percent_off) / 100);
       code = p.code;
       db.prepare("UPDATE promotions SET uses = uses + 1 WHERE id = ?").run(p.id);
     }
     // Conditional decrement guards against concurrent oversell.
-    const dec = db.prepare("UPDATE listings SET quantity = quantity - ? WHERE id = ? AND quantity >= ?").run(qty, l.id, qty);
-    if (!dec.changes) throw conflict("Not enough inventory");
+    if (!offerId) {
+      const dec = db.prepare("UPDATE listings SET quantity = quantity - ? WHERE id = ? AND quantity >= ?").run(qty, l.id, qty);
+      if (!dec.changes) throw conflict("Not enough inventory");
+    }
     if (offerId) db.prepare("UPDATE offers SET status = 'ordered' WHERE id = ?").run(offerId);
     const r = db.prepare(`INSERT INTO orders (listing_id, buyer_id, seller_id, offer_id, quantity, unit_price_cents, discount_cents, total_cents, promo_code)
       VALUES (?,?,?,?,?,?,?,?,?)`).run(l.id, user.id, l.seller_id, offerId, qty, unit, discount, subtotal - discount, code);
@@ -117,6 +131,10 @@ export function transitionOrder(user: User, id: number, action: string): Order {
     if (action === "cancel" && o.status === "paid" && !roles.includes("seller")) allowed = false;
     if (!allowed) throw forbidden(`You cannot ${action} this order`);
     if (!t.from.includes(o.status)) throw conflict(`Cannot ${action} an order that is ${o.status}`);
+    if (action === "pay" || action === "ship") {
+      const st = db.prepare("SELECT l.status, u.banned FROM listings l JOIN users u ON u.id = l.seller_id WHERE l.id = ?").get(o.listing_id) as { status: string; banned: number } | undefined;
+      if (!st || st.status !== "active" || st.banned) throw conflict("Listing was removed by moderation; this order can only be cancelled");
+    }
     db.prepare("UPDATE orders SET status = ?, updated_at = datetime('now') WHERE id = ?").run(t.to, id);
     if (t.to === "cancelled") {
       db.prepare("UPDATE listings SET quantity = quantity + ? WHERE id = ?").run(o.quantity, o.listing_id);

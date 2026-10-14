@@ -3,8 +3,8 @@ import { useRouter } from "next/navigation";
 import { useState, type ReactNode } from "react";
 
 /** Submits a form to a JSON API route with fetch; shows errors; redirects or refreshes on success. */
-export default function ApiForm({ action, method = "POST", redirectTo, children, className, confirm: confirmMsg, resetOnSuccess }: {
-  action: string; method?: string; redirectTo?: string; children: ReactNode; className?: string; confirm?: string; resetOnSuccess?: boolean;
+export default function ApiForm({ action, method = "POST", redirectTo, children, className, confirm: confirmMsg, resetOnSuccess, clearCaches }: {
+  action: string; method?: string; redirectTo?: string; children: ReactNode; className?: string; confirm?: string; resetOnSuccess?: boolean; clearCaches?: boolean;
 }) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
@@ -19,6 +19,10 @@ export default function ApiForm({ action, method = "POST", redirectTo, children,
       const data = await res.json().catch(() => ({}));
       if (!res.ok) { setError(data.error || `Request failed (${res.status})`); return; }
       if (resetOnSuccess) form.reset();
+      if (clearCaches && "caches" in window) {
+        // Drop service-worker page caches so the next user on this device can't see this session's pages offline.
+        await Promise.all((await caches.keys()).map((k) => caches.delete(k)));
+      }
       if (redirectTo) {
         const id = data.listing?.id ?? data.order?.id ?? data.offer?.id ?? "";
         router.push(redirectTo.replace("{id}", String(id)));

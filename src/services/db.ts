@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS promotions (
   listing_id INTEGER REFERENCES listings(id) ON DELETE CASCADE,
   category TEXT,
   max_uses INTEGER,
+  per_user_limit INTEGER DEFAULT 1,
   uses INTEGER NOT NULL DEFAULT 0,
   expires_at TEXT,
   active INTEGER NOT NULL DEFAULT 1,
@@ -117,8 +118,15 @@ export function getDb(): Database.Database {
     db.pragma("journal_mode = WAL");
     db.pragma("foreign_keys = ON");
     db.exec(SCHEMA);
+    migrate(db);
   }
   return db;
+}
+
+/** Additive, idempotent migrations for databases created by older versions. */
+function migrate(d: Database.Database) {
+  const cols = (d.prepare("PRAGMA table_info(promotions)").all() as { name: string }[]).map((c) => c.name);
+  if (!cols.includes("per_user_limit")) d.exec("ALTER TABLE promotions ADD COLUMN per_user_limit INTEGER DEFAULT 1");
 }
 
 /** Test helper: drop the singleton so the next getDb() opens a fresh DB. */
