@@ -1,6 +1,7 @@
 import { ZodError } from "zod";
 import { SESSION_TTL_SEC, userFromToken } from "./auth";
 import { AppError, forbidden, unauthorized } from "./errors";
+import { rateLimit, type RateLimitRule } from "./ratelimit";
 import type { User } from "./types";
 
 export const SESSION_COOKIE = "swim_session";
@@ -44,10 +45,11 @@ export async function readBody(req: Request): Promise<Record<string, unknown>> {
 
 type Handler<C> = (req: Request, ctx: C) => Promise<unknown> | unknown;
 
-/** Wraps a route: CSRF origin check on mutations, uniform error mapping. */
-export function route<C = unknown>(fn: Handler<C>) {
+/** Wraps a route: rate limiting, CSRF origin check on mutations, uniform error mapping. */
+export function route<C = unknown>(fn: Handler<C>, opts?: { limit?: RateLimitRule }) {
   return async (req: Request, ctx: C): Promise<Response> => {
     try {
+      if (opts?.limit) rateLimit(req, opts.limit);
       if (req.method !== "GET" && req.method !== "HEAD") {
         const origin = req.headers.get("origin");
         const host = req.headers.get("x-forwarded-host") || req.headers.get("host");
@@ -57,7 +59,11 @@ export function route<C = unknown>(fn: Handler<C>) {
       if (out instanceof Response) return out;
       return Response.json(out ?? { ok: true });
     } catch (e) {
-      if (e instanceof AppError) return Response.json({ error: e.message }, { status: e.status });
+      if (e instanceof AppError) {
+        const res = Response.json({ error: e.message }, { status: e.status });
+        for (const [k, v] of Object.entries(e.headers ?? {})) res.headers.set(k, v);
+        return res;
+      }
       if (e instanceof ZodError) return Response.json({ error: e.issues.map((i) => `${i.path.join(".") || "input"}: ${i.message}`).join("; ") }, { status: 400 });
       console.error(e);
       return Response.json({ error: "Internal error" }, { status: 500 });

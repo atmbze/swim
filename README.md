@@ -5,7 +5,7 @@ Mobile-first marketplace PWA: listings, search & local discovery, storefronts, m
 > **Payments are simulated.** "Pay (mock)" only changes order status. No payment provider is integrated.
 
 ## Quick start
-Requires Node 20+ (prebuilt `better-sqlite3` binaries; no compiler needed on common platforms).
+Requires Node 20+ (`better-sqlite3` v11) or Node 22/24 (`better-sqlite3` v12 — prebuilt binaries; no compiler needed on common platforms).
 ```bash
 npm install
 cp .env.example .env        # optional; defaults work without it
@@ -27,9 +27,10 @@ Production-mode locally: `npm run build && INSECURE_COOKIES=1 npm start` (`INSEC
 
 ## Stack and why
 - **Next.js 15 (App Router) + TypeScript**: one deployable for UI + API route handlers, server components render data with no client fetching layer, and mobile-first HTML works without a SPA framework on top.
-- **SQLite via `better-sqlite3`, raw SQL** (not Prisma): zero external services, synchronous transactions make inventory/state-machine updates simple and atomic, and no engine binary download / codegen step. Trade-off: no migration tool (schema is `CREATE TABLE IF NOT EXISTS` in `src/services/db.ts`), single-node only.
+- **SQLite via `better-sqlite3`, versioned migrations** (`src/services/migrations.ts`, tracked in `schema_migrations`): zero external services, synchronous transactions make inventory/state-machine updates simple and atomic. Trade-off: single-node only.
 - **bcryptjs** (pure JS hashing), **zod** (input validation). That is the entire runtime dependency list besides React.
 - Opaque random session tokens, stored **SHA-256 hashed** in the DB, sent as `HttpOnly; SameSite=Lax` (+`Secure` in production) cookie.
+- **Rate limiting** on login/register/messaging/flagging (fixed window per IP, 429 + Retry-After); **Content-Security-Policy** header on all routes.
 
 ## Layout
 ```

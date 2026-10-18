@@ -7,7 +7,7 @@ import { listActivePromotions } from "@/services/promotions";
 export default async function DealDen() {
   const u = await pageUser();
   const promos = listActivePromotions();
-  const myListings = u ? searchListings({ sellerId: u.id, includeSoldOut: true }) : [];
+  const myListings = u ? searchListings({ sellerId: u.id, includeSoldOut: true }).listings : [];
   return (<><h1>Deal Den</h1><p>Active discount codes. Enter a code at checkout on an eligible listing.</p>
     {promos.length === 0 ? <p className="card">No active deals right now.</p> :
       <div className="grid">{promos.map((p) => <div key={p.id} className="card"><strong>{p.title}</strong><div className="price">{p.percent_off}% off</div><code>{p.code}</code>

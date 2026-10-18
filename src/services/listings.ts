@@ -1,5 +1,5 @@
 import { getDb } from "./db";
-import { forbidden, notFound } from "./errors";
+import { badRequest, forbidden, notFound } from "./errors";
 import { distanceMiles } from "./geo";
 import type { Listing, User } from "./types";
 import { deleteImage, saveImage } from "./uploads";
@@ -30,6 +30,9 @@ export async function updateListing(user: User, id: number, input: Record<string
   assertOwner(l, user);
   const clean = Object.fromEntries(Object.entries(input).filter(([k, v]) => k !== "image" && v !== undefined && v !== ""));
   const d = listingUpdateSchema.parse(clean);
+  if (d.quantity !== undefined && d.quantity < (l.reserved_quantity ?? 0)) {
+    throw badRequest("Quantity cannot be set below the units reserved by accepted offers");
+  }
   const sets: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(d)) if (v !== undefined) sets[k === "price" ? "price_cents" : k] = v;
   const image = await saveImage(input.image);
@@ -54,12 +57,21 @@ export function deleteListing(user: User, id: number) {
   }
 }
 
-export interface SearchParams { q?: string; category?: string; minPrice?: string; maxPrice?: string; condition?: string; zip?: string; radius?: string; city?: string; sellerId?: number; sort?: string; includeSoldOut?: boolean }
+export interface SearchParams { q?: string; category?: string; minPrice?: string; maxPrice?: string; condition?: string; zip?: string; radius?: string; city?: string; sellerId?: number; sort?: string; includeSoldOut?: boolean; page?: string; perPage?: string }
 
-export function searchListings(p: SearchParams): Listing[] {
+export interface SearchResult { listings: Listing[]; total: number; page: number; perPage: number }
+
+/** Units not tied up by accepted offers. */
+export function availableQty(l: { quantity: number; reserved_quantity?: number | null }): number {
+  return l.quantity - (l.reserved_quantity ?? 0);
+}
+
+export function searchListings(p: SearchParams): SearchResult {
+  const perPage = Math.min(100, Math.max(1, Math.floor(Number(p.perPage) || 24)));
+  const page = Math.max(1, Math.floor(Number(p.page) || 1));
   const where = ["l.status = 'active'", "u.banned = 0"];
   const args: Record<string, unknown> = {};
-  if (!p.includeSoldOut) where.push("l.quantity > 0");
+  if (!p.includeSoldOut) where.push("(l.quantity - l.reserved_quantity) > 0");
   if (p.q) { where.push("(l.title LIKE @q ESCAPE '\\' OR l.description LIKE @q ESCAPE '\\')"); args.q = `%${p.q.replace(/[\\%_]/g, (c) => "\\" + c)}%`; }
   if (p.category) { where.push("l.category = @category"); args.category = p.category; }
   if (p.condition) { where.push("l.condition = @condition"); args.condition = p.condition; }
@@ -69,14 +81,30 @@ export function searchListings(p: SearchParams): Listing[] {
   if (p.maxPrice && !isNaN(max)) { where.push("l.price_cents <= @max"); args.max = Math.round(max * 100); }
   if (p.sellerId) { where.push("l.seller_id = @sellerId"); args.sellerId = p.sellerId; }
   const order = p.sort === "price_asc" ? "l.price_cents ASC" : p.sort === "price_desc" ? "l.price_cents DESC" : "l.created_at DESC, l.id DESC";
-  let rows = getDb().prepare(`SELECT l.*, u.name AS seller_name FROM listings l JOIN users u ON u.id = l.seller_id WHERE ${where.join(" AND ")} ORDER BY ${order} LIMIT 200`).all(args) as Listing[];
-  if (p.zip && /^\d{5}$/.test(p.zip)) {
-    const radius = Number(p.radius) || 0;
+  const from = `FROM listings l JOIN users u ON u.id = l.seller_id WHERE ${where.join(" AND ")}`;
+  const zipOk = !!p.zip && /^\d{5}$/.test(p.zip);
+  const radius = Number(p.radius) || 0;
+
+  if (zipOk && radius > 0) {
+    // Distance filtering happens in JS over a bounded set; paginate the filtered rows.
+    let rows = getDb().prepare(`SELECT l.*, u.name AS seller_name ${from} ORDER BY ${order} LIMIT 200`).all(args) as Listing[];
+    rows = rows
+      .map((r) => ({ ...r, distance: distanceMiles(p.zip!, r.zip) }))
+      .filter((r) => r.distance != null && r.distance <= radius);
+    if (p.sort === "distance") rows.sort((a, b) => (a.distance ?? 1e9) - (b.distance ?? 1e9));
+    const total = rows.length;
+    return { listings: rows.slice((page - 1) * perPage, page * perPage), total, page, perPage };
+  }
+
+  const { c: total } = getDb().prepare(`SELECT COUNT(*) AS c ${from}`).get(args) as { c: number };
+  let rows = getDb()
+    .prepare(`SELECT l.*, u.name AS seller_name ${from} ORDER BY ${order} LIMIT @limit OFFSET @offset`)
+    .all({ ...args, limit: perPage, offset: (page - 1) * perPage }) as Listing[];
+  if (zipOk) {
     rows = rows.map((r) => ({ ...r, distance: distanceMiles(p.zip!, r.zip) }));
-    if (radius > 0) rows = rows.filter((r) => r.distance != null && r.distance <= radius);
     if (p.sort === "distance") rows.sort((a, b) => (a.distance ?? 1e9) - (b.distance ?? 1e9));
   }
-  return rows;
+  return { listings: rows, total, page, perPage };
 }
 
 export function flagListing(user: User, id: number, reason: string) {

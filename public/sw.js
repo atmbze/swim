@@ -3,6 +3,19 @@ const CACHE = "swim-v1";
 const PRECACHE = ["/offline", "/manifest.webmanifest", "/icon.svg"];
 self.addEventListener("install", (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(PRECACHE)).then(() => self.skipWaiting())); });
 self.addEventListener("activate", (e) => { e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim())); });
+// On logout the page asks us to drop cached navigations so a signed-out (or
+// next) user on a shared device never sees another session's HTML.
+self.addEventListener("message", (e) => {
+  if (!e.data || e.data.type !== "CLEAR_PAGE_CACHE") return;
+  e.waitUntil(caches.open(CACHE).then(async (c) => {
+    const keys = await c.keys();
+    await Promise.all(keys.map((req) => {
+      const path = new URL(req.url).pathname;
+      const keep = PRECACHE.includes(path) || path.startsWith("/_next/static/");
+      return keep ? Promise.resolve(false) : c.delete(req);
+    }));
+  }));
+});
 self.addEventListener("fetch", (e) => {
   const req = e.request;
   const url = new URL(req.url);

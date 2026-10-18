@@ -5,7 +5,9 @@ import { searchListings } from "@/services/listings";
 
 export default async function Home({ searchParams }: { searchParams: Promise<Record<string, string>> }) {
   const sp = await searchParams;
-  const listings = searchListings(sp);
+  const { listings, total, page, perPage } = searchListings(sp);
+  const totalPages = Math.max(1, Math.ceil(total / perPage));
+  const pageHref = (n: number) => `/?${new URLSearchParams({ ...sp, page: String(n) })}`;
   return (<>
     <h1>Browse the Southwest</h1>
     <form className="filters" role="search" aria-label="Search listings">
@@ -20,7 +22,13 @@ export default async function Home({ searchParams }: { searchParams: Promise<Rec
       <label>Sort<select name="sort" defaultValue={sp.sort || ""}><option value="">Newest</option><option value="price_asc">Price ↑</option><option value="price_desc">Price ↓</option><option value="distance">Distance</option></select></label>
       <div style={{ alignSelf: "end" }}><button>Search</button></div>
     </form>
-    <p className="muted">{listings.length} result{listings.length === 1 ? "" : "s"}</p>
+    <p className="muted">{total} result{total === 1 ? "" : "s"}{totalPages > 1 ? ` · page ${page} of ${totalPages}` : ""}</p>
     {listings.length === 0 ? <p className="card">No listings match. Try widening your filters.</p> : <div className="grid">{listings.map((l) => <ListingCard key={l.id} l={l} />)}</div>}
+    {totalPages > 1 && (
+      <nav aria-label="Search results pages" className="row" style={{ marginTop: 16 }}>
+        {page > 1 ? <a className="secondary" href={pageHref(page - 1)}>← Previous</a> : <span className="muted">← Previous</span>}
+        {page < totalPages ? <a className="secondary" href={pageHref(page + 1)}>Next →</a> : <span className="muted">Next →</span>}
+      </nav>
+    )}
   </>);
 }

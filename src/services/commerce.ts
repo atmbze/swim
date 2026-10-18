@@ -1,9 +1,32 @@
 import { getDb } from "./db";
 import { badRequest, conflict, forbidden, notFound } from "./errors";
-import { getListing } from "./listings";
+import { availableQty, getListing } from "./listings";
 import { resolvePromo } from "./promotions";
 import type { Offer, Order, User } from "./types";
 import { offerSchema, orderSchema } from "./validation";
+
+/** Accepted offers hold their units for this long before expiring. */
+export const OFFER_TTL_HOURS = 48;
+
+/**
+ * Lazily expire accepted offers past their expiry, releasing reservations.
+ * Runs in its own transaction so the expiry persists even if the caller's
+ * operation fails; call it before mutating offers.
+ */
+function sweepExpiredOffers(): void {
+  const db = getDb();
+  db.transaction(() => {
+    const expired = db
+      .prepare(
+        "SELECT id, listing_id, quantity FROM offers WHERE status = 'accepted' AND expires_at IS NOT NULL AND expires_at < datetime('now')"
+      )
+      .all() as { id: number; listing_id: number; quantity: number }[];
+    for (const o of expired) {
+      db.prepare("UPDATE offers SET status = 'expired' WHERE id = ?").run(o.id);
+      db.prepare("UPDATE listings SET reserved_quantity = MAX(reserved_quantity - ?, 0) WHERE id = ?").run(o.quantity, o.listing_id);
+    }
+  })();
+}
 
 /* ---------- Offers: pending -> accepted|rejected|withdrawn ; accepted -> ordered ---------- */
 export const OFFER_TRANSITIONS: Record<string, { from: string[]; by: "buyer" | "seller" }> = {
@@ -24,21 +47,40 @@ export function createOffer(user: User, input: unknown): Offer {
   const l = getListing(d.listingId, user);
   if (l.status !== "active") throw badRequest("Listing not available");
   if (l.seller_id === user.id) throw forbidden("Cannot make an offer on your own listing");
-  if (d.quantity > l.quantity) throw badRequest("Not enough inventory");
+  if (d.quantity > availableQty(l)) throw badRequest("Not enough inventory");
   const r = getDb().prepare("INSERT INTO offers (listing_id, buyer_id, amount_cents, quantity) VALUES (?,?,?,?)").run(l.id, user.id, d.amount, d.quantity);
   return getOffer(Number(r.lastInsertRowid));
 }
 
 export function transitionOffer(user: User, id: number, action: string): Offer {
-  const o = getOffer(id);
-  const t = OFFER_TRANSITIONS[action];
-  if (!t) throw badRequest("Unknown action");
-  const l = getListing(o.listing_id, user);
-  const actorOk = t.by === "seller" ? l.seller_id === user.id : o.buyer_id === user.id;
-  if (!actorOk) throw forbidden(`Only the ${t.by} can ${action} this offer`);
-  if (!t.from.includes(o.status)) throw conflict(`Cannot ${action} an offer that is ${o.status}`);
-  getDb().prepare("UPDATE offers SET status = ? WHERE id = ?").run(OFFER_RESULT[action], id);
-  return getOffer(id);
+  sweepExpiredOffers();
+  const db = getDb();
+  return db.transaction(() => {
+    const o = getOffer(id);
+    const t = OFFER_TRANSITIONS[action];
+    if (!t) throw badRequest("Unknown action");
+    const l = getListing(o.listing_id, user);
+    const actorOk = t.by === "seller" ? l.seller_id === user.id : o.buyer_id === user.id;
+    if (!actorOk) throw forbidden(`Only the ${t.by} can ${action} this offer`);
+    if (!t.from.includes(o.status)) throw conflict(`Cannot ${action} an offer that is ${o.status}`);
+    const result = OFFER_RESULT[action];
+    if (action === "accept") {
+      // Reserve the units so a second acceptance can't oversell the same stock.
+      // The conditional update keeps this safe under concurrency.
+      const res = db.prepare(
+        "UPDATE listings SET reserved_quantity = reserved_quantity + ? WHERE id = ? AND quantity - reserved_quantity >= ?"
+      ).run(o.quantity, l.id, o.quantity);
+      if (!res.changes) throw conflict("Not enough available inventory to accept this offer");
+      db.prepare(`UPDATE offers SET status = ?, expires_at = datetime('now', '+${OFFER_TTL_HOURS} hours') WHERE id = ?`).run(result, id);
+    } else {
+      if (o.status === "accepted" && result === "withdrawn") {
+        // Buyer walked away from an accepted offer: release the reservation.
+        db.prepare("UPDATE listings SET reserved_quantity = MAX(reserved_quantity - ?, 0) WHERE id = ?").run(o.quantity, l.id);
+      }
+      db.prepare("UPDATE offers SET status = ? WHERE id = ?").run(result, id);
+    }
+    return getOffer(id);
+  })();
 }
 
 export function listOffers(user: User) {
@@ -69,6 +111,7 @@ export function getOrder(id: number): Order {
 
 export function createOrder(user: User, input: unknown): Order {
   const d = orderSchema.parse(input);
+  sweepExpiredOffers();
   const db = getDb();
   return db.transaction(() => {
     let listingId: number, qty: number, unit: number, offerId: number | null = null, discount = 0, code: string | null = null;
@@ -84,7 +127,9 @@ export function createOrder(user: User, input: unknown): Order {
     const l = getListing(listingId);
     if (l.status !== "active") throw badRequest("Listing not available");
     if (l.seller_id === user.id) throw forbidden("Cannot buy your own listing");
-    if (qty > l.quantity) throw conflict("Not enough inventory");
+    // Offer orders draw on the reservation made at acceptance; direct orders
+    // must leave reserved units alone.
+    if (!offerId && qty > availableQty(l)) throw conflict("Not enough inventory");
     const subtotal = unit * qty;
     if (!("offerId" in d) && d.promoCode) {
       const p = resolvePromo(d.promoCode, l);
@@ -92,8 +137,12 @@ export function createOrder(user: User, input: unknown): Order {
       code = p.code;
       db.prepare("UPDATE promotions SET uses = uses + 1 WHERE id = ?").run(p.id);
     }
-    // Conditional decrement guards against concurrent oversell.
-    const dec = db.prepare("UPDATE listings SET quantity = quantity - ? WHERE id = ? AND quantity >= ?").run(qty, l.id, qty);
+    // Conditional decrement guards against concurrent oversell. Offer orders
+    // consume the reservation made at acceptance; direct orders must leave
+    // reserved units alone.
+    const dec = offerId
+      ? db.prepare("UPDATE listings SET quantity = quantity - ?, reserved_quantity = reserved_quantity - ? WHERE id = ? AND reserved_quantity >= ?").run(qty, qty, l.id, qty)
+      : db.prepare("UPDATE listings SET quantity = quantity - ? WHERE id = ? AND quantity - reserved_quantity >= ?").run(qty, l.id, qty);
     if (!dec.changes) throw conflict("Not enough inventory");
     if (offerId) db.prepare("UPDATE offers SET status = 'ordered' WHERE id = ?").run(offerId);
     const r = db.prepare(`INSERT INTO orders (listing_id, buyer_id, seller_id, offer_id, quantity, unit_price_cents, discount_cents, total_cents, promo_code)
@@ -117,6 +166,12 @@ export function transitionOrder(user: User, id: number, action: string): Order {
     if (action === "cancel" && o.status === "paid" && !roles.includes("seller")) allowed = false;
     if (!allowed) throw forbidden(`You cannot ${action} this order`);
     if (!t.from.includes(o.status)) throw conflict(`Cannot ${action} an order that is ${o.status}`);
+    // Money must not move for a listing moderation removed: block pay/ship.
+    // Confirm and cancel still work so in-flight orders can settle.
+    if (action === "pay" || action === "ship") {
+      const ls = db.prepare("SELECT status FROM listings WHERE id = ?").get(o.listing_id) as { status: string } | undefined;
+      if (ls?.status === "removed") throw conflict(`Cannot ${action} an order for a removed listing`);
+    }
     db.prepare("UPDATE orders SET status = ?, updated_at = datetime('now') WHERE id = ?").run(t.to, id);
     if (t.to === "cancelled") {
       db.prepare("UPDATE listings SET quantity = quantity + ? WHERE id = ?").run(o.quantity, o.listing_id);

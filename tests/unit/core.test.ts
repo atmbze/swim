@@ -45,3 +45,20 @@ describe("state machine tables", () => {
     for (const t of Object.values(OFFER_TRANSITIONS)) { expect(t.from).not.toContain("rejected"); expect(t.from).not.toContain("ordered"); }
   });
 });
+
+describe("security headers config", () => {
+  it("serves a strict Content-Security-Policy on all routes", async () => {
+    // @ts-expect-error — next.config.mjs has no type declarations
+    const config = (await import("../../next.config.mjs")).default;
+    const headers = await config.headers();
+    const all = headers.find((h: { source: string }) => h.source === "/(.*)");
+    expect(all).toBeDefined();
+    const csp = all.headers.find((h: { key: string }) => h.key === "Content-Security-Policy");
+    expect(csp).toBeDefined();
+    expect(csp.value).toContain("default-src 'self'");
+    expect(csp.value).toContain("frame-ancestors 'none'");
+    expect(csp.value).toContain("base-uri 'self'");
+    const scriptSrc = csp.value.split(";").find((d: string) => d.trim().startsWith("script-src")) ?? "";
+    expect(scriptSrc).not.toContain("'unsafe-inline'");
+  });
+});

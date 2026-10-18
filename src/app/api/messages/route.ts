@@ -5,4 +5,4 @@ export const GET = route(async (req) => {
   const w = Number(new URL(req.url).searchParams.get("with"));
   return w ? { messages: thread(u, w) } : { conversations: conversations(u) };
 });
-export const POST = route(async (req) => Response.json({ message: sendMessage(requireUser(req), await readBody(req)) }, { status: 201 }));
+export const POST = route(async (req) => Response.json({ message: sendMessage(requireUser(req), await readBody(req)) }, { status: 201 }), { limit: { key: "messages", max: 30, windowSec: 60 } });

@@ -14,13 +14,14 @@
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
-    "better-sqlite3": "^11.10.0",
+    "better-sqlite3": "^12.11.1",
     "next": "^15.5.27",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.14.0",
     "@playwright/test": "^1.64.0",
     "@types/bcryptjs": "^3.0.0",
     "@types/better-sqlite3": "^9.6.0",

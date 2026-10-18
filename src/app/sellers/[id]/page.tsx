@@ -6,7 +6,7 @@ export default async function Storefront({ params }: { params: Promise<{ id: str
   const id = Number((await params).id);
   const s = getUser(id);
   if (!s || s.banned) notFound();
-  const listings = searchListings({ sellerId: id, includeSoldOut: true });
+  const { listings } = searchListings({ sellerId: id, includeSoldOut: true });
   return (<>
     <h1>{s.name}&apos;s storefront</h1>
     <p className="muted">{s.city} {s.zip} · member since {s.created_at.slice(0, 10)}</p>

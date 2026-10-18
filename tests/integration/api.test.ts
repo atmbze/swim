@@ -242,3 +242,131 @@ describe("admin moderation", () => {
     expect((await call(ordersR.POST, { cookie: b.cookie, body: { listingId: Number(id2) } })).status).toBe(404);
   });
 });
+
+describe("rate limiting", () => {
+  it("throttles repeated logins from one IP with 429 and Retry-After", async () => {
+    await user("rl@t.test");
+    const ip = { "x-forwarded-for": "203.0.113.9" };
+    let limited = 0;
+    for (let i = 0; i < 12; i++) {
+      const r = await call(loginR.POST, { body: { email: "rl@t.test", password: "wrong" }, headers: ip });
+      if (r.status === 429) {
+        limited++;
+        expect(r.json.error).toMatch(/Too many requests/);
+        expect(r.res.headers.get("retry-after")).toMatch(/^\d+$/);
+      } else {
+        expect(r.status).toBe(401);
+      }
+    }
+    expect(limited).toBeGreaterThan(0);
+    // A different IP is unaffected.
+    expect((await call(loginR.POST, { body: { email: "rl@t.test", password: "password123" }, headers: { "x-forwarded-for": "203.0.113.10" } })).status).toBe(200);
+  });
+  it("throttles message spam from one IP", async () => {
+    const a = await user("m1@t.test"), b = await user("m2@t.test");
+    const ip = { "x-forwarded-for": "203.0.113.11" };
+    let limited = 0;
+    for (let i = 0; i < 32; i++) {
+      const r = await call(msgR.POST, { cookie: a.cookie, body: { recipientId: b.id, body: "hi" }, headers: ip });
+      if (r.status === 429) limited++;
+      else expect(r.status).toBe(201);
+    }
+    expect(limited).toBeGreaterThan(0);
+  });
+});
+
+describe("inventory reservation on offer acceptance", () => {
+  it("second acceptance of the last unit fails fast; withdraw releases; order consumes", async () => {
+    const s = await user("s@t.test"), b1 = await user("b1@t.test"), b2 = await user("b2@t.test");
+    const id = await listing(s.cookie, { quantity: 1 });
+    const o1 = (await call(offersR.POST, { cookie: b1.cookie, body: { listingId: id, amount: 10 } })).json.offer;
+    const o2 = (await call(offersR.POST, { cookie: b2.cookie, body: { listingId: id, amount: 11 } })).json.offer;
+    expect((await call(offerR.POST, { cookie: s.cookie, params: P(o1.id), body: { action: "accept" } })).json.offer.status).toBe("accepted");
+    expect((await call(listingR.GET, { params: P(id), cookie: s.cookie })).json.listing.reserved_quantity).toBe(1);
+    // The second acceptance now fails here instead of failing at checkout.
+    expect((await call(offerR.POST, { cookie: s.cookie, params: P(o2.id), body: { action: "accept" } })).status).toBe(409);
+    // Buyer walks away from the accepted offer: reservation released.
+    expect((await call(offerR.POST, { cookie: b1.cookie, params: P(o1.id), body: { action: "withdraw" } })).json.offer.status).toBe("withdrawn");
+    expect((await call(listingR.GET, { params: P(id), cookie: s.cookie })).json.listing.reserved_quantity).toBe(0);
+    expect((await call(offerR.POST, { cookie: s.cookie, params: P(o2.id), body: { action: "accept" } })).json.offer.status).toBe("accepted");
+    // Ordering consumes both the reservation and the stock.
+    const ord = (await call(ordersR.POST, { cookie: b2.cookie, body: { offerId: o2.id } })).json.order;
+    expect(ord.status).toBe("pending_payment");
+    const l = (await call(listingR.GET, { params: P(id), cookie: s.cookie })).json.listing;
+    expect(l.quantity).toBe(0);
+    expect(l.reserved_quantity).toBe(0);
+  });
+  it("expired accepted offers release their reservation lazily", async () => {
+    const s = await user("s@t.test"), b = await user("b@t.test");
+    const id = await listing(s.cookie, { quantity: 1 });
+    const o = (await call(offersR.POST, { cookie: b.cookie, body: { listingId: id, amount: 10 } })).json.offer;
+    await call(offerR.POST, { cookie: s.cookie, params: P(o.id), body: { action: "accept" } });
+    db.prepare("UPDATE offers SET expires_at = datetime('now', '-1 hour') WHERE id = ?").run(o.id);
+    // The next mutation sweeps it: the offer can no longer be ordered from.
+    expect((await call(ordersR.POST, { cookie: b.cookie, body: { offerId: o.id } })).status).toBe(409);
+    expect(db.prepare("SELECT status FROM offers WHERE id = ?").get(o.id)).toMatchObject({ status: "expired" });
+    expect((await call(listingR.GET, { params: P(id), cookie: s.cookie })).json.listing.reserved_quantity).toBe(0);
+  });
+  it("seller cannot drop quantity below reserved units", async () => {
+    const s = await user("s@t.test"), b = await user("b@t.test");
+    const id = await listing(s.cookie, { quantity: 2 });
+    const o = (await call(offersR.POST, { cookie: b.cookie, body: { listingId: id, amount: 10, quantity: 2 } })).json.offer;
+    await call(offerR.POST, { cookie: s.cookie, params: P(o.id), body: { action: "accept" } });
+    expect((await call(listingR.PATCH, { method: "PATCH", cookie: s.cookie, params: P(id), body: { quantity: 1 } })).status).toBe(400);
+    expect((await call(listingR.PATCH, { method: "PATCH", cookie: s.cookie, params: P(id), body: { quantity: 2 } })).status).toBe(200);
+  });
+});
+
+describe("removed listings block order progress", () => {
+  it("pay fails after removal; cancel still lets the buyer out", async () => {
+    const s = await user("s@t.test"), b = await user("b@t.test"), a = await admin();
+    const id = await listing(s.cookie, { quantity: 1 });
+    const ord = (await call(ordersR.POST, { cookie: b.cookie, body: { listingId: id } })).json.order;
+    const T = (c: string, action: string) => call(orderR.POST, { cookie: c, params: P(ord.id), body: { action } });
+    expect((await call(admListR.POST, { cookie: a.cookie, params: P(id), body: { action: "remove" } })).status).toBe(200);
+    expect((await T(b.cookie, "pay")).status).toBe(409);
+    expect((await T(b.cookie, "cancel")).json.order.status).toBe("cancelled");
+  });
+  it("ship is blocked after removal; paid orders can still be cancelled", async () => {
+    const s = await user("s@t.test"), b = await user("b@t.test"), a = await admin();
+    const id = await listing(s.cookie, { quantity: 1 });
+    const ord = (await call(ordersR.POST, { cookie: b.cookie, body: { listingId: id } })).json.order;
+    const T = (c: string, action: string) => call(orderR.POST, { cookie: c, params: P(ord.id), body: { action } });
+    expect((await T(b.cookie, "pay")).json.order.status).toBe("paid");
+    expect((await call(admListR.POST, { cookie: a.cookie, params: P(id), body: { action: "remove" } })).status).toBe(200);
+    expect((await T(s.cookie, "ship")).status).toBe(409);
+    expect((await T(s.cookie, "cancel")).json.order.status).toBe("cancelled");
+  });
+});
+
+describe("search pagination", () => {
+  it("paginates with total, page and perPage", async () => {
+    const s = await user("s@t.test");
+    for (let i = 0; i < 30; i++) await listing(s.cookie, { title: `Paginated Widget ${i}` });
+    const p1 = await call(listingsR.GET, { url: "http://localhost/api/listings?q=Widget&perPage=10" });
+    expect(p1.json.total).toBe(30);
+    expect(p1.json.listings).toHaveLength(10);
+    expect(p1.json.page).toBe(1);
+    expect(p1.json.perPage).toBe(10);
+    const p2 = await call(listingsR.GET, { url: "http://localhost/api/listings?q=Widget&perPage=10&page=2" });
+    expect(p2.json.page).toBe(2);
+    expect(p2.json.listings).toHaveLength(10);
+    const ids1 = new Set(p1.json.listings.map((l: { id: number }) => l.id));
+    for (const l of p2.json.listings) expect(ids1.has(l.id)).toBe(false);
+    const p3 = await call(listingsR.GET, { url: "http://localhost/api/listings?q=Widget&perPage=10&page=3" });
+    expect(p3.json.listings).toHaveLength(10);
+    const big = await call(listingsR.GET, { url: "http://localhost/api/listings?q=Widget&perPage=500" });
+    expect(big.json.perPage).toBe(100);
+  });
+});
+
+describe("migrations", () => {
+  it("records applied versions and adds the reservation columns", async () => {
+    const v = (db.prepare("SELECT version FROM schema_migrations ORDER BY version").all() as { version: number }[]).map((r) => r.version);
+    expect(v).toEqual([1, 2]);
+    const cols = (db.prepare("PRAGMA table_info(listings)").all() as { name: string }[]).map((c) => c.name);
+    expect(cols).toContain("reserved_quantity");
+    const ocols = (db.prepare("PRAGMA table_info(offers)").all() as { name: string }[]).map((c) => c.name);
+    expect(ocols).toContain("expires_at");
+  });
+});

@@ -94,3 +94,25 @@ Mock payments only; no shipping, taxes, refunds beyond status change; no reviews
 
 ## 12. Recommended next milestone
 "Pilot-ready": items in roadmap step 1 + migrations + pagination + inventory-reservation fix + axe/a11y and SW offline tests in Playwright, then a staging deploy with Postgres and object storage.
+
+## 13. Pilot-ready hardening — 2026-10-18 (second pass)
+All roadmap step-1 items plus migrations, pagination, inventory reservation, and removed-listing order guards are now implemented. Environment note: `better-sqlite3` was bumped 11.x → 12.x because the build machine runs Node 24 (v11 has no Node 24 prebuild); README's Node 20 note still applies to v11.
+
+### What changed
+- **Rate limiting** (`src/services/ratelimit.ts`, wired via `route(fn, { limit })` in `src/services/http.ts`): login 10/min, register 10/hour, message send 30/min, listing flag 20/hour per IP (x-forwarded-for / x-real-ip). Exhausted buckets get HTTP 429 with a Retry-After header.
+- **Content-Security-Policy** (`next.config.mjs`): `default-src 'self'`, no inline scripts, `frame-ancestors 'none'`, `base-uri 'self'`; dev build additionally allows `'unsafe-eval'` for Next HMR.
+- **SW cache clear on logout** (`public/sw.js` + `src/components/LogoutForm.tsx`): logout posts `CLEAR_PAGE_CACHE` to the service worker, which drops cached navigations (precache + `/_next/static/` kept), so a shared device never shows another session's HTML.
+- **Soft-404 fixed**: removed root `src/app/loading.tsx`, which was forcing a 200 stream before `notFound()`. Missing listings/pages now return HTTP 404.
+- **Migrations** (`src/services/migrations.ts`, `schema_migrations` table): v1 = previous idempotent baseline (safe on pre-existing DBs), v2 adds `listings.reserved_quantity` and `offers.expires_at`. Unknown future versions fail fast at startup.
+- **Pagination** (`searchListings` returns `{ listings, total, page, perPage }`): default 24/page, max 100; home page has prev/next nav; API returns the envelope. Radius search still filters in JS over a bounded 200-row set, then paginates.
+- **Inventory reservation on offer acceptance**: accepting an offer reserves units (`reserved_quantity`, conditional update); a second acceptance of the same stock fails 409 at accept time instead of at checkout. Withdrawing an accepted offer releases; ordering from an offer consumes reservation + stock atomically; direct orders ignore reserved units; sellers can't lower quantity below reserved. Accepted offers expire after 48h (lazy sweep on the next offer/order mutation, own transaction so expiry persists).
+- **Removed listings block order progress**: pay/ship on an order whose listing was removed now fail 409; confirm/cancel still work so in-flight orders can settle.
+
+### Verification
+- `npm test`: 31 passed (was 21) — new suites cover rate limits, CSP config, reservation lifecycle + expiry, removed-listing guards, pagination, migrations.
+- `npm run typecheck`, `npm run lint` (0 errors) pass.
+- Playwright (`tests/e2e/pilot.spec.ts`): 404 status test, security-headers test, axe scan (no serious/critical violations on /, /login, /register, /buyback), SW offline-fallback test, logout-clears-SW-cache test. Run with `npm run test:e2e` (needs `npm run build` first).
+- Sandbox note (2026-10-18): the full Playwright run could not execute in this sandbox — the system Chromium build hard-blocks all loopback access (`ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS`, not overridable by flags) and the egress proxy blocks downloading Playwright's bundled browser. Verified instead via curl against a production build: `/listings/999999` → HTTP 404, and the CSP / nosniff / DENY headers are served. The new Playwright spec was manually audited (selectors, headings, cache names match the app code) and color-contrast ratios were computed to pass WCAG AA (muted 4.63:1, links 7.04:1, price 4.99:1, button text 5.18:1, error 6.24:1), but it should be run in CI / on a dev machine before treating it as green.
+
+### Still open (from the original roadmap, not in this pass)
+Per-user promo limits, image re-encode/EXIF strip, real geocoding beyond the 15-ZIP table, Postgres + object storage, real payments, email/notifications. `npm audit` advisories in Next's bundled PostCSS remain (need Next 16).

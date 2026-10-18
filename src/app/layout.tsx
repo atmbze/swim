@@ -1,7 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import Link from "next/link";
 import SWRegister from "@/components/SWRegister";
-import ApiForm from "@/components/ApiForm";
+import LogoutForm from "@/components/LogoutForm";
 import { pageUser } from "@/services/page-auth";
 import "./globals.css";
 
@@ -27,7 +27,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
               <Link href="/offers">Offers</Link>
               <Link href="/profile">{user.name}</Link>
               {user.role === "admin" && <Link href="/admin">Admin</Link>}
-              <ApiForm action="/api/auth/logout" redirectTo="/" className="inline"><button className="link">Logout</button></ApiForm>
+              <LogoutForm />
             </>) : (<><Link href="/login">Login</Link><Link href="/register">Register</Link></>)}
           </nav>
         </header>

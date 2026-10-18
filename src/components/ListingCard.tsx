@@ -9,7 +9,7 @@ export default function ListingCard({ l }: { l: Listing }) {
       <div>
         <strong>{l.title}</strong>
         <div className="price">{fmt(l.price_cents)}</div>
-        <small>{l.category} · {l.city || l.zip || "—"}{l.distance != null ? ` · ${l.distance.toFixed(0)} mi` : ""}{l.quantity === 0 ? " · sold out" : ""}</small>
+        <small>{l.category} · {l.city || l.zip || "—"}{l.distance != null ? ` · ${l.distance.toFixed(0)} mi` : ""}{l.quantity - (l.reserved_quantity ?? 0) === 0 ? " · sold out" : ""}</small>
       </div>
     </Link>
   );
