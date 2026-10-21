@@ -363,7 +363,7 @@ describe("search pagination", () => {
 describe("migrations", () => {
   it("records applied versions and adds the reservation columns", async () => {
     const v = (db.prepare("SELECT version FROM schema_migrations ORDER BY version").all() as { version: number }[]).map((r) => r.version);
-    expect(v).toEqual([1, 2]);
+    expect(v).toEqual([1, 2, 3]);
     const cols = (db.prepare("PRAGMA table_info(listings)").all() as { name: string }[]).map((c) => c.name);
     expect(cols).toContain("reserved_quantity");
     const ocols = (db.prepare("PRAGMA table_info(offers)").all() as { name: string }[]).map((c) => c.name);

@@ -48,5 +48,7 @@ export const promoSchema = z.object({
   listingId: z.union([z.literal("").transform(() => undefined), z.coerce.number().int().positive()]).optional(),
   category: z.union([z.literal("").transform(() => undefined), z.enum(CATEGORIES)]).optional(),
   maxUses: z.union([z.literal("").transform(() => undefined), z.coerce.number().int().positive()]).optional(),
+  /** Uses per buyer; default 1; 0 = unlimited. */
+  perUserLimit: z.union([z.literal("").transform(() => 1), z.coerce.number().int().min(0).max(1000)]).default(1),
   expiresAt: z.union([z.literal("").transform(() => undefined), z.string().regex(/^\d{4}-\d{2}-\d{2}$/)]).optional(),
 });

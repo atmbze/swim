@@ -126,6 +126,13 @@ ALTER TABLE listings ADD COLUMN reserved_quantity INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE offers ADD COLUMN expires_at TEXT;
 `,
   },
+  {
+    version: 3,
+    name: "promo_per_user_limit",
+    sql: `
+ALTER TABLE promotions ADD COLUMN per_user_limit INTEGER DEFAULT 1;
+`,
+  },
 ];
 
 export function migrate(db: Database.Database): void {

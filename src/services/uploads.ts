@@ -2,6 +2,7 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import { badRequest } from "./errors";
+import { stripMetadata } from "./exif";
 
 export const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 export const uploadDir = () => process.env.UPLOAD_DIR || path.join(process.cwd(), "data", "uploads");
@@ -23,9 +24,11 @@ export async function saveImage(file: unknown): Promise<string | null> {
   const buf = Buffer.from(await f.arrayBuffer());
   const ext = sniffImage(buf);
   if (!ext) throw badRequest("Image must be JPEG, PNG or WebP");
+  const clean = stripMetadata(buf, ext);
+  if (!clean) throw badRequest("Image file is corrupt");
   const name = `${crypto.randomBytes(16).toString("hex")}.${ext}`;
   fs.mkdirSync(uploadDir(), { recursive: true });
-  fs.writeFileSync(path.join(uploadDir(), name), buf);
+  fs.writeFileSync(path.join(uploadDir(), name), clean);
   return name;
 }
 
