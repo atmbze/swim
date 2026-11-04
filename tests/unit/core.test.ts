@@ -46,19 +46,25 @@ describe("state machine tables", () => {
   });
 });
 
-describe("security headers config", () => {
-  it("serves a strict Content-Security-Policy on all routes", async () => {
-    // @ts-expect-error — next.config.mjs has no type declarations
-    const config = (await import("../../next.config.mjs")).default;
-    const headers = await config.headers();
-    const all = headers.find((h: { source: string }) => h.source === "/(.*)");
-    expect(all).toBeDefined();
-    const csp = all.headers.find((h: { key: string }) => h.key === "Content-Security-Policy");
-    expect(csp).toBeDefined();
-    expect(csp.value).toContain("default-src 'self'");
-    expect(csp.value).toContain("frame-ancestors 'none'");
-    expect(csp.value).toContain("base-uri 'self'");
-    const scriptSrc = csp.value.split(";").find((d: string) => d.trim().startsWith("script-src")) ?? "";
+describe("security headers", () => {
+  it("serves a strict, per-request nonce Content-Security-Policy", async () => {
+    const { NextRequest } = await import("next/server");
+    const { middleware } = await import("@/middleware");
+    const a = middleware(new NextRequest("http://localhost/")).headers.get("Content-Security-Policy") ?? "";
+    const b = middleware(new NextRequest("http://localhost/")).headers.get("Content-Security-Policy") ?? "";
+    expect(a).toContain("default-src 'self'");
+    expect(a).toContain("frame-ancestors 'none'");
+    expect(a).toContain("base-uri 'self'");
+    const scriptSrc = a.split(";").find((d) => d.trim().startsWith("script-src")) ?? "";
+    expect(scriptSrc).toMatch(/'nonce-[A-Za-z0-9+/=]+'/);
     expect(scriptSrc).not.toContain("'unsafe-inline'");
+    expect(a).not.toBe(b); // a fresh nonce per request
+  });
+  it("keeps the static hardening headers on all routes", async () => {
+    // @ts-expect-error - next.config.mjs has no type declarations
+    const config = (await import("../../next.config.mjs")).default;
+    const all = (await config.headers()).find((h: { source: string }) => h.source === "/(.*)");
+    const keys = all.headers.map((h: { key: string }) => h.key);
+    expect(keys).toEqual(expect.arrayContaining(["X-Content-Type-Options", "X-Frame-Options", "Referrer-Policy"]));
   });
 });
