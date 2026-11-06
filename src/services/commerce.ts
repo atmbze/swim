@@ -132,7 +132,7 @@ export function createOrder(user: User, input: unknown): Order {
     if (!offerId && qty > availableQty(l)) throw conflict("Not enough inventory");
     const subtotal = unit * qty;
     if (!("offerId" in d) && d.promoCode) {
-      const p = resolvePromo(d.promoCode, l);
+      const p = resolvePromo(d.promoCode, l, user.id);
       discount = Math.round((subtotal * p.percent_off) / 100);
       code = p.code;
       db.prepare("UPDATE promotions SET uses = uses + 1 WHERE id = ?").run(p.id);
