@@ -4,9 +4,9 @@ import { getUser } from "@/services/auth";
 import { searchListings } from "@/services/listings";
 export default async function Storefront({ params }: { params: Promise<{ id: string }> }) {
   const id = Number((await params).id);
-  const s = getUser(id);
+  const s = await getUser(id);
   if (!s || s.banned) notFound();
-  const { listings } = searchListings({ sellerId: id, includeSoldOut: true });
+  const { listings } = await searchListings({ sellerId: id, includeSoldOut: true });
   return (<>
     <h1>{s.name}&apos;s storefront</h1>
     <p className="muted">{s.city} {s.zip} · member since {s.created_at.slice(0, 10)}</p>

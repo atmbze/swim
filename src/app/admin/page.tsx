@@ -7,8 +7,8 @@ import { requirePageUser } from "@/services/page-auth";
 export default async function Admin() {
   const u = await requirePageUser("/admin");
   if (u.role !== "admin") return <p role="alert" className="error">403 — admins only.</p>;
-  const { flagged, users } = adminOverview(u);
-  const bb = listAllBuybacks(u);
+  const { flagged, users } = await adminOverview(u);
+  const bb = await listAllBuybacks(u);
   const A = ({ url, action, label }: { url: string; action: string; label: string }) => <ApiForm action={url} className="inline"><input type="hidden" name="action" value={action} /><button className="secondary">{label}</button></ApiForm>;
   return (<><h1>Admin moderation</h1>
     <h2>Flagged / removed listings</h2>{flagged.length === 0 ? <p className="muted">Nothing flagged.</p> : <table><tbody>{flagged.map((l) => <tr key={l.id}><td><Link href={`/listings/${l.id}`}>{l.title}</Link> by {l.seller_name}</td><td>{l.flag_count} flags: {l.reasons}</td><td>{l.status}</td>

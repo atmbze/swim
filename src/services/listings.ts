@@ -1,12 +1,14 @@
-import { getDb } from "./db";
+import { execute, query, queryOne, type DbExecutor } from "./db";
 import { badRequest, forbidden, notFound } from "./errors";
 import { distanceMiles } from "./geo";
 import type { Listing, User } from "./types";
 import { deleteImage, saveImage } from "./uploads";
 import { listingSchema, listingUpdateSchema } from "./validation";
 
-export function getListing(id: number, viewer?: User | null): Listing {
-  const l = getDb().prepare("SELECT l.*, u.name AS seller_name, u.banned AS seller_banned FROM listings l JOIN users u ON u.id = l.seller_id WHERE l.id = ?").get(id) as (Listing & { seller_banned?: number }) | undefined;
+const LISTING_SQL = "SELECT l.*, u.name AS seller_name, u.banned AS seller_banned FROM listings l JOIN users u ON u.id = l.seller_id WHERE l.id = $1";
+
+export async function getListing(id: number, viewer?: User | null, exec?: DbExecutor): Promise<Listing> {
+  const l = await queryOne<Listing & { seller_banned?: number }>(LISTING_SQL, [id], exec);
   if (!l) throw notFound("Listing not found");
   // Removed listings are only visible to their seller and admins.
   if ((l.status === "removed" || l.seller_banned) && !(viewer && (viewer.role === "admin" || viewer.id === l.seller_id))) throw notFound("Listing not found");
@@ -20,13 +22,16 @@ function assertOwner(l: Listing, user: User) {
 export async function createListing(user: User, input: Record<string, unknown>): Promise<Listing> {
   const d = listingSchema.parse({ ...input, city: input.city || user.city, zip: input.zip || user.zip });
   const image = await saveImage(input.image);
-  const r = getDb().prepare(`INSERT INTO listings (seller_id, title, description, price_cents, category, condition, quantity, city, zip, image)
-    VALUES (?,?,?,?,?,?,?,?,?,?)`).run(user.id, d.title, d.description, d.price, d.category, d.condition, d.quantity, d.city, d.zip, image);
-  return getListing(Number(r.lastInsertRowid), user);
+  const r = await queryOne<{ id: number }>(
+    `INSERT INTO listings (seller_id, title, description, price_cents, category, condition, quantity, city, zip, image)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+    [user.id, d.title, d.description, d.price, d.category, d.condition, d.quantity, d.city, d.zip, image]
+  );
+  return getListing(r!.id, user);
 }
 
 export async function updateListing(user: User, id: number, input: Record<string, unknown>): Promise<Listing> {
-  const l = getListing(id, user);
+  const l = await getListing(id, user);
   assertOwner(l, user);
   const clean = Object.fromEntries(Object.entries(input).filter(([k, v]) => k !== "image" && v !== undefined && v !== ""));
   const d = listingUpdateSchema.parse(clean);
@@ -36,24 +41,30 @@ export async function updateListing(user: User, id: number, input: Record<string
   const sets: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(d)) if (v !== undefined) sets[k === "price" ? "price_cents" : k] = v;
   const image = await saveImage(input.image);
-  if (image) { sets.image = image; deleteImage(l.image); }
-  if (Object.keys(sets).length) {
-    getDb().prepare(`UPDATE listings SET ${Object.keys(sets).map((k) => `${k} = @${k}`).join(", ")}, updated_at = datetime('now') WHERE id = @id`).run({ ...sets, id });
+  if (image) {
+    sets.image = image;
+    await deleteImage(l.image);
+  }
+  const keys = Object.keys(sets);
+  if (keys.length) {
+    await execute(
+      `UPDATE listings SET ${keys.map((k, i) => `${k} = $${i + 1}`).join(", ")}, updated_at = now() WHERE id = $${keys.length + 1}`,
+      [...keys.map((k) => sets[k]), id]
+    );
   }
   return getListing(id, user);
 }
 
-export function deleteListing(user: User, id: number) {
-  const l = getListing(id, user);
+export async function deleteListing(user: User, id: number) {
+  const l = await getListing(id, user);
   assertOwner(l, user);
-  const db = getDb();
-  const hasOrders = db.prepare("SELECT 1 FROM orders WHERE listing_id = ?").get(id);
+  const hasOrders = await queryOne("SELECT 1 FROM orders WHERE listing_id = $1", [id]);
   if (hasOrders) {
     // Keep order history intact: soft-remove instead of hard delete.
-    db.prepare("UPDATE listings SET status = 'removed', quantity = 0 WHERE id = ?").run(id);
+    await execute("UPDATE listings SET status = 'removed', quantity = 0 WHERE id = $1", [id]);
   } else {
-    db.prepare("DELETE FROM listings WHERE id = ?").run(id);
-    deleteImage(l.image);
+    await execute("DELETE FROM listings WHERE id = $1", [id]);
+    await deleteImage(l.image);
   }
 }
 
@@ -66,20 +77,25 @@ export function availableQty(l: { quantity: number; reserved_quantity?: number |
   return l.quantity - (l.reserved_quantity ?? 0);
 }
 
-export function searchListings(p: SearchParams): SearchResult {
+export async function searchListings(p: SearchParams): Promise<SearchResult> {
   const perPage = Math.min(100, Math.max(1, Math.floor(Number(p.perPage) || 24)));
   const page = Math.max(1, Math.floor(Number(p.page) || 1));
   const where = ["l.status = 'active'", "u.banned = 0"];
-  const args: Record<string, unknown> = {};
+  const params: unknown[] = [];
+  const ph = (v: unknown) => {
+    params.push(v);
+    return `$${params.length}`;
+  };
   if (!p.includeSoldOut) where.push("(l.quantity - l.reserved_quantity) > 0");
-  if (p.q) { where.push("(l.title LIKE @q ESCAPE '\\' OR l.description LIKE @q ESCAPE '\\')"); args.q = `%${p.q.replace(/[\\%_]/g, (c) => "\\" + c)}%`; }
-  if (p.category) { where.push("l.category = @category"); args.category = p.category; }
-  if (p.condition) { where.push("l.condition = @condition"); args.condition = p.condition; }
-  if (p.city) { where.push("l.city LIKE @city"); args.city = `%${p.city}%`; }
+  // ILIKE: Postgres LIKE is case-sensitive (SQLite's was not) — search must stay case-insensitive.
+  if (p.q) { const pat = ph(`%${p.q.replace(/[\\%_]/g, (c) => "\\" + c)}%`); where.push(`(l.title ILIKE ${pat} ESCAPE '\\' OR l.description ILIKE ${pat} ESCAPE '\\')`); }
+  if (p.category) where.push(`l.category = ${ph(p.category)}`);
+  if (p.condition) where.push(`l.condition = ${ph(p.condition)}`);
+  if (p.city) where.push(`l.city ILIKE ${ph(`%${p.city}%`)}`);
   const min = Number(p.minPrice), max = Number(p.maxPrice);
-  if (p.minPrice && !isNaN(min)) { where.push("l.price_cents >= @min"); args.min = Math.round(min * 100); }
-  if (p.maxPrice && !isNaN(max)) { where.push("l.price_cents <= @max"); args.max = Math.round(max * 100); }
-  if (p.sellerId) { where.push("l.seller_id = @sellerId"); args.sellerId = p.sellerId; }
+  if (p.minPrice && !isNaN(min)) where.push(`l.price_cents >= ${ph(Math.round(min * 100))}`);
+  if (p.maxPrice && !isNaN(max)) where.push(`l.price_cents <= ${ph(Math.round(max * 100))}`);
+  if (p.sellerId) where.push(`l.seller_id = ${ph(p.sellerId)}`);
   const order = p.sort === "price_asc" ? "l.price_cents ASC" : p.sort === "price_desc" ? "l.price_cents DESC" : "l.created_at DESC, l.id DESC";
   const from = `FROM listings l JOIN users u ON u.id = l.seller_id WHERE ${where.join(" AND ")}`;
   const zipOk = !!p.zip && /^\d{5}$/.test(p.zip);
@@ -87,7 +103,7 @@ export function searchListings(p: SearchParams): SearchResult {
 
   if (zipOk && radius > 0) {
     // Distance filtering happens in JS over a bounded set; paginate the filtered rows.
-    let rows = getDb().prepare(`SELECT l.*, u.name AS seller_name ${from} ORDER BY ${order} LIMIT 200`).all(args) as Listing[];
+    let rows = await query<Listing>(`SELECT l.*, u.name AS seller_name ${from} ORDER BY ${order} LIMIT 200`, params);
     rows = rows
       .map((r) => ({ ...r, distance: distanceMiles(p.zip!, r.zip) }))
       .filter((r) => r.distance != null && r.distance <= radius);
@@ -96,10 +112,12 @@ export function searchListings(p: SearchParams): SearchResult {
     return { listings: rows.slice((page - 1) * perPage, page * perPage), total, page, perPage };
   }
 
-  const { c: total } = getDb().prepare(`SELECT COUNT(*) AS c ${from}`).get(args) as { c: number };
-  let rows = getDb()
-    .prepare(`SELECT l.*, u.name AS seller_name ${from} ORDER BY ${order} LIMIT @limit OFFSET @offset`)
-    .all({ ...args, limit: perPage, offset: (page - 1) * perPage }) as Listing[];
+  const countRow = await queryOne<{ c: number }>(`SELECT COUNT(*) AS c ${from}`, params);
+  const total = countRow?.c ?? 0;
+  let rows = await query<Listing>(
+    `SELECT l.*, u.name AS seller_name ${from} ORDER BY ${order} LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+    [...params, perPage, (page - 1) * perPage]
+  );
   if (zipOk) {
     rows = rows.map((r) => ({ ...r, distance: distanceMiles(p.zip!, r.zip) }));
     if (p.sort === "distance") rows.sort((a, b) => (a.distance ?? 1e9) - (b.distance ?? 1e9));
@@ -107,10 +125,10 @@ export function searchListings(p: SearchParams): SearchResult {
   return { listings: rows, total, page, perPage };
 }
 
-export function flagListing(user: User, id: number, reason: string) {
-  const l = getListing(id, user);
+export async function flagListing(user: User, id: number, reason: string) {
+  const l = await getListing(id, user);
   if (l.seller_id === user.id) throw forbidden("Cannot flag your own listing");
   const r = String(reason || "").trim().slice(0, 500) || "unspecified";
-  const res = getDb().prepare("INSERT OR IGNORE INTO flags (listing_id, reporter_id, reason) VALUES (?,?,?)").run(id, user.id, r);
-  if (res.changes) getDb().prepare("UPDATE listings SET flag_count = flag_count + 1 WHERE id = ?").run(id);
+  const changes = await execute("INSERT INTO flags (listing_id, reporter_id, reason) VALUES ($1,$2,$3) ON CONFLICT (listing_id, reporter_id) DO NOTHING", [id, user.id, r]);
+  if (changes) await execute("UPDATE listings SET flag_count = flag_count + 1 WHERE id = $1", [id]);
 }

@@ -6,9 +6,9 @@ import { requirePageUser } from "@/services/page-auth";
 export default async function Thread({ params }: { params: Promise<{ id: string }> }) {
   const otherId = Number((await params).id);
   const u = await requirePageUser(`/messages/${otherId}`);
-  const other = getUser(otherId);
+  const other = await getUser(otherId);
   if (!other) notFound();
-  const msgs = thread(u, otherId);
+  const msgs = await thread(u, otherId);
   return (<><h1>Chat with {other.name}</h1>
     {msgs.length === 0 && <p className="muted">No messages yet.</p>}
     <div aria-live="polite">{msgs.map((m) => <div key={m.id} className={`msg ${m.sender_id === u.id ? "mine" : "theirs"}`}>{m.listing_title && <small>re: {m.listing_title}<br /></small>}{m.body}<br /><small className="muted">{m.created_at}</small></div>)}</div>

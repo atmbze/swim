@@ -7,7 +7,7 @@ const Act = ({ id, action, label }: { id: number; action: string; label: string 
   <ApiForm action={`/api/offers/${id}`} className="inline"><input type="hidden" name="action" value={action} /><button>{label}</button></ApiForm>);
 export default async function Offers() {
   const u = await requirePageUser("/offers");
-  const { sent, received } = listOffers(u);
+  const { sent, received } = await listOffers(u);
   return (<><h1>Offers</h1>
     <h2>Received</h2>{received.length === 0 ? <p className="muted">None.</p> : <table><tbody>{received.map((o) => <tr key={o.id}><td><Link href={`/listings/${o.listing_id}`}>{o.title}</Link></td><td>{o.buyer_name}</td><td>{fmt(o.amount_cents)} × {o.quantity}</td><td>{o.status}</td>
       <td>{o.status === "pending" && <><Act id={o.id} action="accept" label="Accept" /> <Act id={o.id} action="reject" label="Reject" /></>}</td></tr>)}</tbody></table>}

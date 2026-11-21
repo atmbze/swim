@@ -5,7 +5,7 @@ import { searchListings } from "@/services/listings";
 
 export default async function Home({ searchParams }: { searchParams: Promise<Record<string, string>> }) {
   const sp = await searchParams;
-  const { listings, total, page, perPage } = searchListings(sp);
+  const { listings, total, page, perPage } = await searchListings(sp);
   const totalPages = Math.max(1, Math.ceil(total / perPage));
   const pageHref = (n: number) => `/?${new URLSearchParams({ ...sp, page: String(n) })}`;
   return (<>

@@ -1,4 +1,5 @@
-import { getDb } from "./db";
+import type { PoolClient } from "pg";
+import { execute, query, queryOne, withTransaction, type DbExecutor } from "./db";
 import { badRequest, conflict, forbidden, notFound } from "./errors";
 import { availableQty, getListing } from "./listings";
 import { resolvePromo } from "./promotions";
@@ -13,19 +14,24 @@ export const OFFER_TTL_HOURS = 48;
  * Runs in its own transaction so the expiry persists even if the caller's
  * operation fails; call it before mutating offers.
  */
-function sweepExpiredOffers(): void {
-  const db = getDb();
-  db.transaction(() => {
-    const expired = db
-      .prepare(
-        "SELECT id, listing_id, quantity FROM offers WHERE status = 'accepted' AND expires_at IS NOT NULL AND expires_at < datetime('now')"
-      )
-      .all() as { id: number; listing_id: number; quantity: number }[];
+async function sweepExpiredOffers(): Promise<void> {
+  await withTransaction(async (client) => {
+    const expired = await query<{ id: number; listing_id: number; quantity: number }>(
+      "SELECT id, listing_id, quantity FROM offers WHERE status = 'accepted' AND expires_at IS NOT NULL AND expires_at < now()",
+      [],
+      client
+    );
     for (const o of expired) {
-      db.prepare("UPDATE offers SET status = 'expired' WHERE id = ?").run(o.id);
-      db.prepare("UPDATE listings SET reserved_quantity = MAX(reserved_quantity - ?, 0) WHERE id = ?").run(o.quantity, o.listing_id);
+      await execute("UPDATE offers SET status = 'expired' WHERE id = $1", [o.id], client);
+      // GREATEST, not MAX: in Postgres MAX is an aggregate, not a scalar clamp.
+      await execute("UPDATE listings SET reserved_quantity = GREATEST(reserved_quantity - $1, 0) WHERE id = $2", [o.quantity, o.listing_id], client);
     }
-  })();
+  });
+}
+
+/** Lock a row for the rest of the transaction (SQLite serialized all writers; Postgres does not). */
+async function lockRow(client: PoolClient, table: "offers" | "orders" | "listings", id: number): Promise<void> {
+  await queryOne(`SELECT id FROM ${table} WHERE id = $1 FOR UPDATE`, [id], client);
 }
 
 /* ---------- Offers: pending -> accepted|rejected|withdrawn ; accepted -> ordered ---------- */
@@ -36,30 +42,30 @@ export const OFFER_TRANSITIONS: Record<string, { from: string[]; by: "buyer" | "
 };
 const OFFER_RESULT: Record<string, string> = { accept: "accepted", reject: "rejected", withdraw: "withdrawn" };
 
-export function getOffer(id: number): Offer {
-  const o = getDb().prepare("SELECT * FROM offers WHERE id = ?").get(id) as Offer | undefined;
+export async function getOffer(id: number, exec?: DbExecutor): Promise<Offer> {
+  const o = await queryOne<Offer>("SELECT * FROM offers WHERE id = $1", [id], exec);
   if (!o) throw notFound("Offer not found");
   return o;
 }
 
-export function createOffer(user: User, input: unknown): Offer {
+export async function createOffer(user: User, input: unknown): Promise<Offer> {
   const d = offerSchema.parse(input);
-  const l = getListing(d.listingId, user);
+  const l = await getListing(d.listingId, user);
   if (l.status !== "active") throw badRequest("Listing not available");
   if (l.seller_id === user.id) throw forbidden("Cannot make an offer on your own listing");
   if (d.quantity > availableQty(l)) throw badRequest("Not enough inventory");
-  const r = getDb().prepare("INSERT INTO offers (listing_id, buyer_id, amount_cents, quantity) VALUES (?,?,?,?)").run(l.id, user.id, d.amount, d.quantity);
-  return getOffer(Number(r.lastInsertRowid));
+  const r = await queryOne<{ id: number }>("INSERT INTO offers (listing_id, buyer_id, amount_cents, quantity) VALUES ($1,$2,$3,$4) RETURNING id", [l.id, user.id, d.amount, d.quantity]);
+  return getOffer(r!.id);
 }
 
-export function transitionOffer(user: User, id: number, action: string): Offer {
-  sweepExpiredOffers();
-  const db = getDb();
-  return db.transaction(() => {
-    const o = getOffer(id);
+export async function transitionOffer(user: User, id: number, action: string): Promise<Offer> {
+  await sweepExpiredOffers();
+  return withTransaction(async (client) => {
+    await lockRow(client, "offers", id);
+    const o = await getOffer(id, client);
     const t = OFFER_TRANSITIONS[action];
     if (!t) throw badRequest("Unknown action");
-    const l = getListing(o.listing_id, user);
+    const l = await getListing(o.listing_id, user, client);
     const actorOk = t.by === "seller" ? l.seller_id === user.id : o.buyer_id === user.id;
     if (!actorOk) throw forbidden(`Only the ${t.by} can ${action} this offer`);
     if (!t.from.includes(o.status)) throw conflict(`Cannot ${action} an offer that is ${o.status}`);
@@ -67,28 +73,29 @@ export function transitionOffer(user: User, id: number, action: string): Offer {
     if (action === "accept") {
       // Reserve the units so a second acceptance can't oversell the same stock.
       // The conditional update keeps this safe under concurrency.
-      const res = db.prepare(
-        "UPDATE listings SET reserved_quantity = reserved_quantity + ? WHERE id = ? AND quantity - reserved_quantity >= ?"
-      ).run(o.quantity, l.id, o.quantity);
-      if (!res.changes) throw conflict("Not enough available inventory to accept this offer");
-      db.prepare(`UPDATE offers SET status = ?, expires_at = datetime('now', '+${OFFER_TTL_HOURS} hours') WHERE id = ?`).run(result, id);
+      const changes = await execute(
+        "UPDATE listings SET reserved_quantity = reserved_quantity + $1 WHERE id = $2 AND quantity - reserved_quantity >= $1",
+        [o.quantity, l.id],
+        client
+      );
+      if (!changes) throw conflict("Not enough available inventory to accept this offer");
+      await execute("UPDATE offers SET status = $1, expires_at = now() + $2 * interval '1 hour' WHERE id = $3", [result, OFFER_TTL_HOURS, id], client);
     } else {
       if (o.status === "accepted" && result === "withdrawn") {
         // Buyer walked away from an accepted offer: release the reservation.
-        db.prepare("UPDATE listings SET reserved_quantity = MAX(reserved_quantity - ?, 0) WHERE id = ?").run(o.quantity, l.id);
+        await execute("UPDATE listings SET reserved_quantity = GREATEST(reserved_quantity - $1, 0) WHERE id = $2", [o.quantity, l.id], client);
       }
-      db.prepare("UPDATE offers SET status = ? WHERE id = ?").run(result, id);
+      await execute("UPDATE offers SET status = $1 WHERE id = $2", [result, id], client);
     }
-    return getOffer(id);
-  })();
+    return getOffer(id, client);
+  });
 }
 
-export function listOffers(user: User) {
-  const db = getDb();
+export async function listOffers(user: User) {
   const q = `SELECT o.*, l.title, l.seller_id, b.name AS buyer_name FROM offers o JOIN listings l ON l.id = o.listing_id JOIN users b ON b.id = o.buyer_id`;
   return {
-    sent: db.prepare(`${q} WHERE o.buyer_id = ? ORDER BY o.id DESC`).all(user.id) as (Offer & { title: string })[],
-    received: db.prepare(`${q} WHERE l.seller_id = ? ORDER BY o.id DESC`).all(user.id) as (Offer & { title: string; buyer_name: string })[],
+    sent: await query<Offer & { title: string }>(`${q} WHERE o.buyer_id = $1 ORDER BY o.id DESC`, [user.id]),
+    received: await query<Offer & { title: string; buyer_name: string }>(`${q} WHERE l.seller_id = $1 ORDER BY o.id DESC`, [user.id]),
   };
 }
 
@@ -103,28 +110,29 @@ export const ORDER_TRANSITIONS: Record<string, { from: string[]; to: string; by:
   cancel: { from: ["pending_payment", "paid"], to: "cancelled", by: ["buyer", "seller"] },
 };
 
-export function getOrder(id: number): Order {
-  const o = getDb().prepare("SELECT * FROM orders WHERE id = ?").get(id) as Order | undefined;
+export async function getOrder(id: number, exec?: DbExecutor): Promise<Order> {
+  const o = await queryOne<Order>("SELECT * FROM orders WHERE id = $1", [id], exec);
   if (!o) throw notFound("Order not found");
   return o;
 }
 
-export function createOrder(user: User, input: unknown): Order {
+export async function createOrder(user: User, input: unknown): Promise<Order> {
   const d = orderSchema.parse(input);
-  sweepExpiredOffers();
-  const db = getDb();
-  return db.transaction(() => {
-    let listingId: number, qty: number, unit: number, offerId: number | null = null, discount = 0, code: string | null = null;
+  await sweepExpiredOffers();
+  return withTransaction(async (client) => {
+    let listingId: number, qty: number, unit = 0, offerId: number | null = null, discount = 0, code: string | null = null;
     if ("offerId" in d) {
-      const o = getOffer(d.offerId);
+      await lockRow(client, "offers", d.offerId);
+      const o = await getOffer(d.offerId, client);
       if (o.buyer_id !== user.id) throw forbidden("Not your offer");
       if (o.status !== "accepted") throw conflict(`Offer is ${o.status}, not accepted`);
       listingId = o.listing_id; qty = o.quantity; unit = o.amount_cents; offerId = o.id;
     } else {
       listingId = d.listingId; qty = d.quantity;
-      unit = getListing(listingId).price_cents;
     }
-    const l = getListing(listingId);
+    await lockRow(client, "listings", listingId);
+    const l = await getListing(listingId, undefined, client);
+    if (!("offerId" in d)) unit = l.price_cents;
     if (l.status !== "active") throw badRequest("Listing not available");
     if (l.seller_id === user.id) throw forbidden("Cannot buy your own listing");
     // Offer orders draw on the reservation made at acceptance; direct orders
@@ -132,29 +140,33 @@ export function createOrder(user: User, input: unknown): Order {
     if (!offerId && qty > availableQty(l)) throw conflict("Not enough inventory");
     const subtotal = unit * qty;
     if (!("offerId" in d) && d.promoCode) {
-      const p = resolvePromo(d.promoCode, l);
+      const p = await resolvePromo(d.promoCode, l, client);
       discount = Math.round((subtotal * p.percent_off) / 100);
       code = p.code;
-      db.prepare("UPDATE promotions SET uses = uses + 1 WHERE id = ?").run(p.id);
+      await execute("UPDATE promotions SET uses = uses + 1 WHERE id = $1", [p.id], client);
     }
     // Conditional decrement guards against concurrent oversell. Offer orders
     // consume the reservation made at acceptance; direct orders must leave
     // reserved units alone.
-    const dec = offerId
-      ? db.prepare("UPDATE listings SET quantity = quantity - ?, reserved_quantity = reserved_quantity - ? WHERE id = ? AND reserved_quantity >= ?").run(qty, qty, l.id, qty)
-      : db.prepare("UPDATE listings SET quantity = quantity - ? WHERE id = ? AND quantity - reserved_quantity >= ?").run(qty, l.id, qty);
-    if (!dec.changes) throw conflict("Not enough inventory");
-    if (offerId) db.prepare("UPDATE offers SET status = 'ordered' WHERE id = ?").run(offerId);
-    const r = db.prepare(`INSERT INTO orders (listing_id, buyer_id, seller_id, offer_id, quantity, unit_price_cents, discount_cents, total_cents, promo_code)
-      VALUES (?,?,?,?,?,?,?,?,?)`).run(l.id, user.id, l.seller_id, offerId, qty, unit, discount, subtotal - discount, code);
-    return getOrder(Number(r.lastInsertRowid));
-  })();
+    const changes = offerId
+      ? await execute("UPDATE listings SET quantity = quantity - $1, reserved_quantity = reserved_quantity - $1 WHERE id = $2 AND reserved_quantity >= $1", [qty, l.id], client)
+      : await execute("UPDATE listings SET quantity = quantity - $1 WHERE id = $2 AND quantity - reserved_quantity >= $1", [qty, l.id], client);
+    if (!changes) throw conflict("Not enough inventory");
+    if (offerId) await execute("UPDATE offers SET status = 'ordered' WHERE id = $1", [offerId], client);
+    const r = await queryOne<{ id: number }>(
+      `INSERT INTO orders (listing_id, buyer_id, seller_id, offer_id, quantity, unit_price_cents, discount_cents, total_cents, promo_code)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+      [l.id, user.id, l.seller_id, offerId, qty, unit, discount, subtotal - discount, code],
+      client
+    );
+    return getOrder(r!.id, client);
+  });
 }
 
-export function transitionOrder(user: User, id: number, action: string): Order {
-  const db = getDb();
-  return db.transaction(() => {
-    const o = getOrder(id);
+export async function transitionOrder(user: User, id: number, action: string): Promise<Order> {
+  return withTransaction(async (client) => {
+    await lockRow(client, "orders", id);
+    const o = await getOrder(id, client);
     const t = ORDER_TRANSITIONS[action];
     if (!t) throw badRequest("Unknown action");
     const roles: ("buyer" | "seller")[] = [];
@@ -169,23 +181,22 @@ export function transitionOrder(user: User, id: number, action: string): Order {
     // Money must not move for a listing moderation removed: block pay/ship.
     // Confirm and cancel still work so in-flight orders can settle.
     if (action === "pay" || action === "ship") {
-      const ls = db.prepare("SELECT status FROM listings WHERE id = ?").get(o.listing_id) as { status: string } | undefined;
+      const ls = await queryOne<{ status: string }>("SELECT status FROM listings WHERE id = $1", [o.listing_id], client);
       if (ls?.status === "removed") throw conflict(`Cannot ${action} an order for a removed listing`);
     }
-    db.prepare("UPDATE orders SET status = ?, updated_at = datetime('now') WHERE id = ?").run(t.to, id);
+    await execute("UPDATE orders SET status = $1, updated_at = now() WHERE id = $2", [t.to, id], client);
     if (t.to === "cancelled") {
-      db.prepare("UPDATE listings SET quantity = quantity + ? WHERE id = ?").run(o.quantity, o.listing_id);
-      if (o.promo_code) db.prepare("UPDATE promotions SET uses = MAX(uses - 1, 0) WHERE code = ?").run(o.promo_code);
+      await execute("UPDATE listings SET quantity = quantity + $1 WHERE id = $2", [o.quantity, o.listing_id], client);
+      if (o.promo_code) await execute("UPDATE promotions SET uses = GREATEST(uses - 1, 0) WHERE code = $1", [o.promo_code], client);
     }
-    return getOrder(id);
-  })();
+    return getOrder(id, client);
+  });
 }
 
-export function listOrders(user: User) {
+export async function listOrders(user: User) {
   const q = `SELECT o.*, l.title FROM orders o JOIN listings l ON l.id = o.listing_id`;
-  const db = getDb();
   return {
-    purchases: db.prepare(`${q} WHERE o.buyer_id = ? ORDER BY o.id DESC`).all(user.id) as (Order & { title: string })[],
-    sales: db.prepare(`${q} WHERE o.seller_id = ? ORDER BY o.id DESC`).all(user.id) as (Order & { title: string })[],
+    purchases: await query<Order & { title: string }>(`${q} WHERE o.buyer_id = $1 ORDER BY o.id DESC`, [user.id]),
+    sales: await query<Order & { title: string }>(`${q} WHERE o.seller_id = $1 ORDER BY o.id DESC`, [user.id]),
   };
 }

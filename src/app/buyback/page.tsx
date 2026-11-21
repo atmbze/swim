@@ -5,7 +5,7 @@ import { CONDITIONS, fmt } from "@/services/constants";
 import { pageUser } from "@/services/page-auth";
 export default async function BuyBacker() {
   const u = await pageUser();
-  const mine = u ? listBuybacks(u) : [];
+  const mine = u ? await listBuybacks(u) : [];
   return (<><h1>BuyBacker</h1><p>Submit an item and SWIM staff will send you a buyback quote. (Quotes are informational in this MVP; no payout is processed.)</p>
     {!u ? <p><Link href="/login?next=/buyback">Log in</Link> to submit an item.</p> : (<>
       <div className="card"><ApiForm action="/api/buyback" resetOnSuccess>

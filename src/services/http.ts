@@ -14,9 +14,9 @@ export function readCookie(req: Request, name: string): string | undefined {
   }
 }
 
-export const currentUser = (req: Request): User | null => userFromToken(readCookie(req, SESSION_COOKIE));
-export function requireUser(req: Request): User {
-  const u = currentUser(req);
+export const currentUser = (req: Request): Promise<User | null> => userFromToken(readCookie(req, SESSION_COOKIE));
+export async function requireUser(req: Request): Promise<User> {
+  const u = await currentUser(req);
   if (!u) throw unauthorized();
   return u;
 }

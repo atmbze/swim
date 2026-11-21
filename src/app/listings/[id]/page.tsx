@@ -4,16 +4,17 @@ import ApiForm from "@/components/ApiForm";
 import { fmt } from "@/services/constants";
 import { availableQty, getListing } from "@/services/listings";
 import { pageUser } from "@/services/page-auth";
+import { imageUrl } from "@/services/uploads";
 
 export default async function ListingPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const u = await pageUser();
-  let l; try { l = getListing(Number(id), u); } catch { notFound(); }
+  let l; try { l = await getListing(Number(id), u); } catch { notFound(); }
   const own = u?.id === l.seller_id;
   const avail = availableQty(l);
   return (<article>
     {l.status === "removed" && <p className="error" role="alert">This listing was removed by moderation.</p>}
-    {l.image && <img src={`/api/images/${l.image}`} alt={l.title} style={{ maxWidth: "100%", maxHeight: 400, borderRadius: 10 }} />}
+    {l.image && <img src={imageUrl(l.image)} alt={l.title} style={{ maxWidth: "100%", maxHeight: 400, borderRadius: 10 }} />}
     <h1>{l.title}</h1>
     <p className="price" style={{ fontSize: 24 }}>{fmt(l.price_cents)}</p>
     <p><span className="badge">{l.category}</span> <span className="badge">{l.condition}</span> <span className="badge">{avail > 0 ? `${avail} available` : "sold out"}</span></p>

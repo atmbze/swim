@@ -1,11 +1,12 @@
 import Link from "next/link";
 import { fmt } from "@/services/constants";
 import type { Listing } from "@/services/types";
+import { imageUrl } from "@/services/uploads";
 
 export default function ListingCard({ l }: { l: Listing }) {
   return (
     <Link href={`/listings/${l.id}`} className="card listing-card">
-      {l.image ? <img src={`/api/images/${l.image}`} alt="" loading="lazy" /> : <div className="noimg" aria-hidden>📦</div>}
+      {l.image ? <img src={imageUrl(l.image)} alt="" loading="lazy" /> : <div className="noimg" aria-hidden>📦</div>}
       <div>
         <strong>{l.title}</strong>
         <div className="price">{fmt(l.price_cents)}</div>

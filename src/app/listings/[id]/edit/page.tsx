@@ -6,7 +6,7 @@ import { requirePageUser } from "@/services/page-auth";
 export default async function Edit({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const u = await requirePageUser(`/listings/${id}/edit`);
-  let l; try { l = getListing(Number(id), u); } catch { notFound(); }
+  let l; try { l = await getListing(Number(id), u); } catch { notFound(); }
   if (l.seller_id !== u.id && u.role !== "admin") return <p role="alert" className="error">You can only edit your own listings.</p>;
   return (<div className="card"><h1>Edit listing</h1>
     <ApiForm action={`/api/listings/${l.id}`} method="PATCH" redirectTo={`/listings/${l.id}`}><ListingFields l={l} /><button>Save</button></ApiForm>
