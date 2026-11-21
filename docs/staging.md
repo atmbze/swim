@@ -1,12 +1,14 @@
 # SWIM Staging Deploy Runbook
 
-Status: **prep only — nothing here has been executed yet.** No accounts exist yet.
+Status: **code refactor COMPLETE (2026-11-21, branch `neon-port`) — accounts/deploy not yet done.**
+No Vercel/Neon/Cloudflare accounts exist yet; Steps 1–8 below are the deploy-day sequence.
 Background and rationale: `STAGING_PLAN_2026-11-21.md` in the goal workspace
-(`~/workspace/goals/s-w-i-m-marketplace-website-build/files/`).
+(`~/workspace/goals/s-w-i-m-marketplace-website-build/files/`); what the refactor changed,
+the test-database choice, and deviations are in `STAGING_PORT_2026-11-21.md` next to it.
 Route: Vercel (app) + Neon Postgres (DB) + Cloudflare R2 (photos), all free tiers for staging.
-Prerequisite code work: the Postgres/R2 refactor described in the plan (§3–§4) must be
-merged before Steps 4–8 can work — the current SQLite build cannot run on Vercel.
-(The plan §8 VPS route can run the unmodified build if staging is needed before the refactor.)
+The app now runs on Postgres via `pg` (SQLite/better-sqlite3 removed) and stores photos in
+R2 when the `R2_*` env vars are set (local disk otherwise), so Steps 4–8 work as written once
+`neon-port` is merged to `master` and pushed.
 
 ## Sign-ins the user (Rare) must do personally
 
@@ -25,9 +27,12 @@ No Stripe sign-in or keys are needed for staging (payments stay mocked).
 
 ## Step 0 — Preconditions
 
-- [ ] Refactor branch (Postgres + R2) merged to `master`, tests green locally
-      (`npm test`, `npm run typecheck`, `npm run build`).
-- [ ] `eaf35ff` + refactor pushed to `origin/master` on GitHub.
+- [x] Refactor done on branch `neon-port` (2026-11-21): typecheck + lint clean,
+      31/31 tests green against real Postgres, production build OK, full local
+      seed + curl verification loop passed (see `STAGING_PORT_2026-11-21.md`).
+- [ ] `neon-port` merged to `master` (Rare's call).
+- [ ] `eaf35ff` + refactor pushed to `origin/master` on GitHub (needs Rare's GitHub sign-in —
+      the local `origin/master` ref still shows `14b539f`, one commit behind local master).
 
 ## Step 1 — Neon project (user signed in)
 
