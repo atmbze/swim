@@ -19,7 +19,7 @@ import * as msgR from "@/app/api/messages/route";
 import * as admListR from "@/app/api/admin/listings/[id]/route";
 import * as admUserR from "@/app/api/admin/users/[id]/route";
 
-let db: ReturnType<typeof freshDb>;
+let db: Awaited<ReturnType<typeof freshDb>>;
 async function user(email: string, extra: Record<string, string> = {}) {
   const r = await call(registerR.POST, { body: { email, password: "password123", name: email.split("@")[0], zip: "85001", ...extra } });
   expect(r.status).toBe(201);
@@ -27,7 +27,7 @@ async function user(email: string, extra: Record<string, string> = {}) {
 }
 async function admin() {
   const a = await user("admin@t.test");
-  db.prepare("UPDATE users SET role='admin' WHERE id=?").run(a.id);
+  await db.run("UPDATE users SET role='admin' WHERE id=$1", a.id);
   return a;
 }
 const LISTING = { title: "Saguaro Lamp", description: "Nice lamp", price: 50, category: "home", condition: "good", quantity: 3, zip: "85701", city: "Tucson" };
@@ -38,12 +38,12 @@ async function listing(cookie: string, over: Record<string, unknown> = {}) {
 }
 const P = (id: number) => ({ id: String(id) });
 
-beforeEach(() => { db = freshDb(); });
+beforeEach(async () => { db = await freshDb(); });
 
 describe("auth", () => {
   it("registers, stores a bcrypt hash, logs in, logs out", async () => {
     const u = await user("a@t.test");
-    const row = db.prepare("SELECT password_hash FROM users WHERE id=?").get(u.id) as { password_hash: string };
+    const row = (await db.get<{ password_hash: string }>("SELECT password_hash FROM users WHERE id=$1", u.id))!;
     expect(row.password_hash).toMatch(/^\$2[aby]\$/);
     expect(row.password_hash).not.toContain("password123");
     expect((await call(meR.GET, { cookie: u.cookie })).json.user.email).toBe("a@t.test");
@@ -237,9 +237,9 @@ describe("admin moderation", () => {
     expect((await call(admUserR.POST, { cookie: a.cookie, params: P(s.id), body: { action: "ban" } })).status).toBe(200);
     expect((await call(meR.GET, { cookie: s.cookie })).status).toBe(401);
     expect((await call(loginR.POST, { body: { email: "s@t.test", password: "password123" } })).status).toBe(403);
-    const id2 = (db.prepare("INSERT INTO listings (seller_id,title,description,price_cents,category,condition,quantity) VALUES (?,?,?,?,?,?,?)").run(s.id, "Banned item", "d", 100, "home", "good", 1)).lastInsertRowid;
-    expect((await call(listingR.GET, { params: P(Number(id2)) })).status).toBe(404);
-    expect((await call(ordersR.POST, { cookie: b.cookie, body: { listingId: Number(id2) } })).status).toBe(404);
+    const id2 = (await db.get<{ id: number }>("INSERT INTO listings (seller_id,title,description,price_cents,category,condition,quantity) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id", s.id, "Banned item", "d", 100, "home", "good", 1))!.id;
+    expect((await call(listingR.GET, { params: P(id2) })).status).toBe(404);
+    expect((await call(ordersR.POST, { cookie: b.cookie, body: { listingId: id2 } })).status).toBe(404);
   });
 });
 
@@ -301,10 +301,10 @@ describe("inventory reservation on offer acceptance", () => {
     const id = await listing(s.cookie, { quantity: 1 });
     const o = (await call(offersR.POST, { cookie: b.cookie, body: { listingId: id, amount: 10 } })).json.offer;
     await call(offerR.POST, { cookie: s.cookie, params: P(o.id), body: { action: "accept" } });
-    db.prepare("UPDATE offers SET expires_at = datetime('now', '-1 hour') WHERE id = ?").run(o.id);
+    await db.run("UPDATE offers SET expires_at = now() - interval '1 hour' WHERE id = $1", o.id);
     // The next mutation sweeps it: the offer can no longer be ordered from.
     expect((await call(ordersR.POST, { cookie: b.cookie, body: { offerId: o.id } })).status).toBe(409);
-    expect(db.prepare("SELECT status FROM offers WHERE id = ?").get(o.id)).toMatchObject({ status: "expired" });
+    expect(await db.get("SELECT status FROM offers WHERE id = $1", o.id)).toMatchObject({ status: "expired" });
     expect((await call(listingR.GET, { params: P(id), cookie: s.cookie })).json.listing.reserved_quantity).toBe(0);
   });
   it("seller cannot drop quantity below reserved units", async () => {
@@ -362,11 +362,11 @@ describe("search pagination", () => {
 
 describe("migrations", () => {
   it("records applied versions and adds the reservation columns", async () => {
-    const v = (db.prepare("SELECT version FROM schema_migrations ORDER BY version").all() as { version: number }[]).map((r) => r.version);
+    const v = (await db.all<{ version: number }>("SELECT version FROM schema_migrations ORDER BY version")).map((r) => r.version);
     expect(v).toEqual([1, 2]);
-    const cols = (db.prepare("PRAGMA table_info(listings)").all() as { name: string }[]).map((c) => c.name);
+    const cols = (await db.all<{ name: string }>("SELECT column_name AS name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'listings'")).map((c) => c.name);
     expect(cols).toContain("reserved_quantity");
-    const ocols = (db.prepare("PRAGMA table_info(offers)").all() as { name: string }[]).map((c) => c.name);
+    const ocols = (await db.all<{ name: string }>("SELECT column_name AS name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'offers'")).map((c) => c.name);
     expect(ocols).toContain("expires_at");
   });
 });
