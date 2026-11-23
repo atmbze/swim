@@ -32,7 +32,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
           </nav>
         </header>
         <main id="main">{children}</main>
-        <footer><small>South West Item Mart LLC · MVP demo · payments are simulated</small></footer>
+        <footer><small>South West Item Mart LLC · MVP demo · payments are simulated · Built by NerdMynd</small></footer>
         <SWRegister />
       </body>
     </html>
