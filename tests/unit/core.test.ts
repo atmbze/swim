@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { distanceMiles } from "@/services/geo";
 import { sniffImage } from "@/services/uploads";
-import { listingSchema, registerSchema, promoSchema } from "@/services/validation";
+import { computePlatformFee, feeBpsFor } from "@/services/fees";
+import { listingSchema, orderSchema, registerSchema, promoSchema } from "@/services/validation";
 import { ORDER_TRANSITIONS, OFFER_TRANSITIONS } from "@/services/commerce";
 
 describe("validation", () => {
@@ -46,6 +47,33 @@ describe("state machine tables", () => {
   });
 });
 
+describe("platform fees (locked 2026-11-21)", () => {
+  it("charges 9.9% shipped for free sellers, 6.9% for premium, 0% local", () => {
+    expect(feeBpsFor("free", "shipped")).toBe(990);
+    expect(feeBpsFor("premium", "shipped")).toBe(690);
+    expect(feeBpsFor("free", "local")).toBe(0);
+    expect(feeBpsFor("premium", "local")).toBe(0);
+    // $100 item + $10 shipping, no tax: base $110 -> 9.9% = $10.89
+    expect(computePlatformFee({ subtotalCents: 10000, discountCents: 0, shippingCents: 1000, tier: "free", deliveryMethod: "shipped" })).toBe(1089);
+    expect(computePlatformFee({ subtotalCents: 10000, discountCents: 0, shippingCents: 1000, tier: "premium", deliveryMethod: "shipped" })).toBe(759);
+    expect(computePlatformFee({ subtotalCents: 10000, discountCents: 0, shippingCents: 1000, tier: "free", deliveryMethod: "local" })).toBe(0);
+  });
+  it("bases the fee on item price paid + shipping — never tax, discount reduces the base", () => {
+    // $100 item, 20% promo, $10 shipping, $5 tax: base is $80 + $10 = $90 -> 9.9% = $8.91 (tax excluded)
+    expect(computePlatformFee({ subtotalCents: 10000, discountCents: 2000, shippingCents: 1000, tier: "free", deliveryMethod: "shipped" })).toBe(891);
+    // Rounding: $10.01 base at 9.9% = $0.99099 -> $0.99
+    expect(computePlatformFee({ subtotalCents: 1001, discountCents: 0, shippingCents: 0, tier: "free", deliveryMethod: "shipped" })).toBe(99);
+  });
+  it("order schema defaults to shipped with no shipping/tax, dollars in / cents out", () => {
+    const o = orderSchema.parse({ listingId: 1 });
+    expect(o.deliveryMethod).toBe("shipped"); expect(o.shipping).toBe(0); expect(o.tax).toBe(0);
+    const o2 = orderSchema.parse({ listingId: 1, deliveryMethod: "local", shipping: "5.99", tax: 2 });
+    expect(o2.shipping).toBe(599); expect(o2.tax).toBe(200);
+    expect(orderSchema.safeParse({ listingId: 1, deliveryMethod: "mail" }).success).toBe(false);
+    expect(orderSchema.safeParse({ listingId: 1, shipping: -1 }).success).toBe(false);
+  });
+});
+
 describe("security headers config", () => {
   it("serves a strict Content-Security-Policy on all routes", async () => {
     // @ts-expect-error — next.config.mjs has no type declarations
@@ -59,6 +87,10 @@ describe("security headers config", () => {
     expect(csp.value).toContain("frame-ancestors 'none'");
     expect(csp.value).toContain("base-uri 'self'");
     const scriptSrc = csp.value.split(";").find((d: string) => d.trim().startsWith("script-src")) ?? "";
-    expect(scriptSrc).not.toContain("'unsafe-inline'");
+    // Staging deliberately allows 'unsafe-inline': Next.js App Router inlines
+    // its flight/startup scripts, and blocking them blanked the staging site
+    // (2026-11-23). The stricter nonce-based CSP lives on branch
+    // port/promo-limit-exif and is the pre-launch hardening path.
+    expect(scriptSrc).toContain("'unsafe-inline'");
   });
 });

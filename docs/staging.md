@@ -120,6 +120,36 @@ and never against production.
 - [ ] Log in as `buyer@swim.test`: send the seller a message; make an offer
 - [ ] As seller: accept the offer; as buyer: create the order and **Pay (mock)**;
       ship → confirm delivery — order statuses advance, inventory decremented
+- [ ] Fee math on the orders page: a shipped order shows 9.9% of (item + shipping,
+      never tax) as its platform fee; a local-pickup order shows a $0.00 fee
+- [ ] Stripe test mode (once keys are set in Vercel — see "Stripe test mode" below):
+      create a PaymentIntent for a pending order, confirm with test card
+      4242 4242 4242 4242, then Pay flips the order to paid; without a confirmed
+      charge, Pay is refused
+
+## Stripe test mode (wired 2026-11-24, branch `neon-port`)
+
+SWIM's OWN Stripe integration (separate from the Layout.ai restricted key).
+Server-side only, behind env flags:
+
+- Migration v3 adds `orders.delivery_method / shipping_cents / tax_cents /
+  platform_fee_cents / stripe_payment_intent_id` and `users.tier`
+  (`free` | `premium`).
+- `createOrder()` computes the locked fee (9.9% shipped free / 6.9% shipped
+  premium / 0% local; base = item price paid + shipping, never tax) and stores
+  it on the order; the buy form takes delivery method + shipping + tax.
+- `POST /api/orders/[id]/payment-intent` (buyer, pending_payment only)
+  creates a PaymentIntent for the order total and stores its id; `pay` then
+  verifies the intent succeeded before flipping the order to paid. With no
+  key configured the route answers 503 and pay stays mock.
+- Keys: `STRIPE_SECRET_KEY` (`sk_test_...`) + `STRIPE_PUBLISHABLE_KEY`
+  (`pk_test_...`) in Vercel env. The app **refuses live keys** on staging.
+  The key is NOT in the repo or the staging env file — the store owner must
+  provide the test-mode secret key via the secure flow (never pasted in chat),
+  after which it goes into Vercel env only and the staging deploy picks it up.
+- Still to build once the key lands: the buyer-facing card-confirm step
+  (Stripe.js + publishable key on the orders page) — the server side above is
+  done; the card form is the remaining piece.
 - [ ] Promo code `WELCOME10` on a direct order shows the 10% discount in `total_cents`
 - [ ] Admin login (`admin@swim.test`): admin page loads, moderation actions work
 - [ ] Hard refresh / new browser: still logged in (session persisted in Neon, not local state)
@@ -137,7 +167,8 @@ and never against production.
 
 - Rate limiting is in-memory per instance (`src/services/ratelimit.ts`) — resets on cold
   start, not shared across instances. Move to a shared store (e.g. Upstash Redis) later.
-- Payments are mocked; the 9.9% platform fee (`PLATFORM_FEE_BPS=990`, base = item +
-  shipping, never tax; 0% local) is config-only until the Stripe step wires it into
-  `createOrder()` / the `pay` transition in `src/services/commerce.ts`.
+- Payments: Stripe test mode is wired server-side behind env flags (see above);
+  until test keys are set, checkout stays mock and the platform fee is computed
+  and stored on every order but no money moves. The buyer card-confirm UI is
+  the remaining piece once the key lands.
 - Vercel Hobby is non-commercial — staging/rehearsal only; Pro is required at launch.

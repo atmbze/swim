@@ -11,6 +11,7 @@ import * as offersR from "@/app/api/offers/route";
 import * as offerR from "@/app/api/offers/[id]/route";
 import * as ordersR from "@/app/api/orders/route";
 import * as orderR from "@/app/api/orders/[id]/route";
+import * as piR from "@/app/api/orders/[id]/payment-intent/route";
 import * as bbR from "@/app/api/buyback/route";
 import * as bbIdR from "@/app/api/buyback/[id]/route";
 import * as promoR from "@/app/api/promotions/route";
@@ -154,6 +155,20 @@ describe("offers and orders state machine", () => {
     expect((await call(ordersR.POST, { cookie: b.cookie, body: { listingId: id, quantity: 1 } })).status).toBe(409);
     expect((await call(orderR.POST, { cookie: b.cookie, params: P(o.id), body: { action: "cancel" } })).json.order.status).toBe("cancelled");
     expect((await call(listingR.GET, { params: P(id) })).json.listing.quantity).toBe(2);
+  });
+  it("platform fee math: 9.9% shipped, 6.9% premium, 0% local; tax never in the base", async () => {
+    const s = await user("s@t.test"), b = await user("b@t.test");
+    const id = await listing(s.cookie, { price: 100, quantity: 5 });
+    // $100 + $10 shipping + $5 tax: total $115.00, fee on $110.00 at 9.9% = $10.89 (tax excluded)
+    const shipped = (await call(ordersR.POST, { cookie: b.cookie, body: { listingId: id, quantity: 1, shipping: 10, tax: 5 } })).json.order;
+    expect(shipped).toMatchObject({ total_cents: 11500, shipping_cents: 1000, tax_cents: 500, platform_fee_cents: 1089, delivery_method: "shipped" });
+    const local = (await call(ordersR.POST, { cookie: b.cookie, body: { listingId: id, quantity: 1, deliveryMethod: "local", tax: 5 } })).json.order;
+    expect(local).toMatchObject({ total_cents: 10500, platform_fee_cents: 0, delivery_method: "local" });
+    await db.run("UPDATE users SET tier='premium' WHERE id=$1", s.id);
+    const prem = (await call(ordersR.POST, { cookie: b.cookie, body: { listingId: id, quantity: 1, shipping: 10, tax: 5 } })).json.order;
+    expect(prem.platform_fee_cents).toBe(759); // 6.9% of $110.00
+    // PaymentIntent route answers 503 while Stripe test mode is unconfigured (mock pay still applies).
+    expect((await call(piR.POST, { cookie: b.cookie, params: P(shipped.id) })).status).toBe(503);
   });
   it("buyer may withdraw a pending offer, seller can then not accept it", async () => {
     const s = await user("s@t.test"), b = await user("b@t.test");
@@ -363,10 +378,14 @@ describe("search pagination", () => {
 describe("migrations", () => {
   it("records applied versions and adds the reservation columns", async () => {
     const v = (await db.all<{ version: number }>("SELECT version FROM schema_migrations ORDER BY version")).map((r) => r.version);
-    expect(v).toEqual([1, 2]);
+    expect(v).toEqual([1, 2, 3]);
     const cols = (await db.all<{ name: string }>("SELECT column_name AS name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'listings'")).map((c) => c.name);
     expect(cols).toContain("reserved_quantity");
     const ocols = (await db.all<{ name: string }>("SELECT column_name AS name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'offers'")).map((c) => c.name);
     expect(ocols).toContain("expires_at");
+    const ordCols = (await db.all<{ name: string }>("SELECT column_name AS name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'orders'")).map((c) => c.name);
+    for (const c of ["delivery_method", "shipping_cents", "tax_cents", "platform_fee_cents", "stripe_payment_intent_id"]) expect(ordCols).toContain(c);
+    const ucols = (await db.all<{ name: string }>("SELECT column_name AS name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'users'")).map((c) => c.name);
+    expect(ucols).toContain("tier");
   });
 });

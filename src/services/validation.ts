@@ -30,9 +30,17 @@ export const listingSchema = z.object({
 });
 export const listingUpdateSchema = listingSchema.partial();
 export const offerSchema = z.object({ listingId: z.coerce.number().int().positive(), amount: dollars, quantity: z.coerce.number().int().min(1).max(10000).default(1) });
+/** Dollars in, cents out — for optional money fields (shipping / tax). */
+const optionalDollars = z.coerce.number().min(0).max(100000).transform((d) => Math.round(d * 100)).default(0);
+/** Delivery + money fields shared by both order shapes. Shipping/tax are dollars in the request, cents on the order. */
+const orderDelivery = {
+  deliveryMethod: z.enum(["shipped", "local"]).default("shipped"),
+  shipping: optionalDollars,
+  tax: optionalDollars,
+};
 export const orderSchema = z.union([
-  z.object({ offerId: z.coerce.number().int().positive() }),
-  z.object({ listingId: z.coerce.number().int().positive(), quantity: z.coerce.number().int().min(1).max(10000).default(1), promoCode: z.string().trim().max(40).optional() }),
+  z.object({ offerId: z.coerce.number().int().positive(), ...orderDelivery }),
+  z.object({ listingId: z.coerce.number().int().positive(), quantity: z.coerce.number().int().min(1).max(10000).default(1), promoCode: z.string().trim().max(40).optional(), ...orderDelivery }),
 ]);
 export const messageSchema = z.object({ recipientId: z.coerce.number().int().positive(), listingId: z.coerce.number().int().positive().optional(), body: z.string().trim().min(1).max(2000) });
 export const buybackSchema = z.object({

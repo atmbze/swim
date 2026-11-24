@@ -143,6 +143,25 @@ ALTER TABLE listings ADD COLUMN reserved_quantity INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE offers ADD COLUMN expires_at TIMESTAMPTZ;
 `,
   },
+  {
+    version: 3,
+    name: "order_fees_and_seller_tier",
+    sql: `
+-- Seller tier (decided 2026-11-21): FREE $0 forever, PREMIUM $14.99/mo drops
+-- the shipped platform fee from 9.9% to 6.9%. The Stripe step selects the
+-- fee bps by the seller's tier in createOrder().
+ALTER TABLE users ADD COLUMN tier TEXT NOT NULL DEFAULT 'free' CHECK (tier IN ('free', 'premium'));
+-- Order money fields for the Stripe step (decided 2026-11-21): fee base is
+-- item price + shipping charged, never sales tax; 9.9% shipped / 6.9% premium
+-- shipped / 0% local pickup. stripe_payment_intent_id holds the Stripe
+-- PaymentIntent created for the order's pay step (test mode on staging).
+ALTER TABLE orders ADD COLUMN delivery_method TEXT NOT NULL DEFAULT 'shipped' CHECK (delivery_method IN ('shipped', 'local'));
+ALTER TABLE orders ADD COLUMN shipping_cents INTEGER NOT NULL DEFAULT 0 CHECK (shipping_cents >= 0);
+ALTER TABLE orders ADD COLUMN tax_cents INTEGER NOT NULL DEFAULT 0 CHECK (tax_cents >= 0);
+ALTER TABLE orders ADD COLUMN platform_fee_cents INTEGER NOT NULL DEFAULT 0 CHECK (platform_fee_cents >= 0);
+ALTER TABLE orders ADD COLUMN stripe_payment_intent_id TEXT;
+`,
+  },
 ];
 
 export async function migrate(client: PoolClient): Promise<void> {

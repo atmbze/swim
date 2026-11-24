@@ -29,6 +29,10 @@ export default async function ListingPage({ params }: { params: Promise<{ id: st
           <input type="hidden" name="listingId" value={l.id} />
           <div className="row"><label>Quantity<input name="quantity" type="number" min={1} max={avail} defaultValue={1} /></label>
           <label>Deal Den code<input name="promoCode" placeholder="optional" /></label></div>
+          <div className="row"><label>Delivery<select name="deliveryMethod" defaultValue="shipped"><option value="shipped">Shipped</option><option value="local">Local pickup</option></select></label>
+          <label>Shipping ($)<input name="shipping" type="number" step="0.01" min="0" defaultValue={0} /></label>
+          <label>Tax ($)<input name="tax" type="number" step="0.01" min="0" defaultValue={0} /></label></div>
+          <p className="muted">Platform fee: 9.9% shipped (6.9% Premium sellers), 0% local pickup — on item + shipping, never tax.</p>
           <button>Place order</button>
         </ApiForm></section>
       <section className="card"><h2>Make an offer</h2>

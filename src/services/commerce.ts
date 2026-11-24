@@ -1,8 +1,10 @@
 import type { PoolClient } from "pg";
 import { execute, query, queryOne, withTransaction, type DbExecutor } from "./db";
 import { badRequest, conflict, forbidden, notFound } from "./errors";
+import { computePlatformFee, type DeliveryMethod, type SellerTier } from "./fees";
 import { availableQty, getListing } from "./listings";
 import { resolvePromo } from "./promotions";
+import { isPaymentIntentSucceeded, isStripeConfigured } from "./stripe";
 import type { Offer, Order, User } from "./types";
 import { offerSchema, orderSchema } from "./validation";
 
@@ -100,9 +102,13 @@ export async function listOffers(user: User) {
 }
 
 /* ---------- Orders ----------
- pending_payment --pay(buyer, MOCK)--> paid --ship(seller)--> shipped --confirm(buyer)--> delivered
+ pending_payment --pay(buyer, MOCK or Stripe test charge)--> paid --ship(seller)--> shipped --confirm(buyer)--> delivered
  pending_payment --cancel(buyer|seller)--> cancelled ; paid --cancel(seller; mock refund)--> cancelled
- Inventory is reserved at creation and restored on cancel. */
+ Inventory is reserved at creation and restored on cancel.
+ Pay: when Stripe test mode is configured (STRIPE_SECRET_KEY set), the buyer
+ must first create a PaymentIntent (POST /api/orders/[id]/payment-intent) and
+ confirm it with a test card; pay then verifies the charge succeeded. With no
+ key configured, pay stays the mock status flip it has always been. */
 export const ORDER_TRANSITIONS: Record<string, { from: string[]; to: string; by: ("buyer" | "seller")[] }> = {
   pay: { from: ["pending_payment"], to: "paid", by: ["buyer"] },
   ship: { from: ["paid"], to: "shipped", by: ["seller"] },
@@ -145,6 +151,15 @@ export async function createOrder(user: User, input: unknown): Promise<Order> {
       code = p.code;
       await execute("UPDATE promotions SET uses = uses + 1 WHERE id = $1", [p.id], client);
     }
+    // Platform fee (locked 2026-11-21): base = item price actually paid +
+    // shipping charged, never tax; rate by seller tier + delivery method.
+    const sellerRow = await queryOne<{ tier: string }>("SELECT tier FROM users WHERE id = $1", [l.seller_id], client);
+    const tier: SellerTier = sellerRow?.tier === "premium" ? "premium" : "free";
+    const deliveryMethod: DeliveryMethod = d.deliveryMethod;
+    const shippingCents = d.shipping;
+    const taxCents = d.tax;
+    const platformFeeCents = computePlatformFee({ subtotalCents: subtotal, discountCents: discount, shippingCents, tier, deliveryMethod });
+    const totalCents = subtotal - discount + shippingCents + taxCents;
     // Conditional decrement guards against concurrent oversell. Offer orders
     // consume the reservation made at acceptance; direct orders must leave
     // reserved units alone.
@@ -154,9 +169,9 @@ export async function createOrder(user: User, input: unknown): Promise<Order> {
     if (!changes) throw conflict("Not enough inventory");
     if (offerId) await execute("UPDATE offers SET status = 'ordered' WHERE id = $1", [offerId], client);
     const r = await queryOne<{ id: number }>(
-      `INSERT INTO orders (listing_id, buyer_id, seller_id, offer_id, quantity, unit_price_cents, discount_cents, total_cents, promo_code)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
-      [l.id, user.id, l.seller_id, offerId, qty, unit, discount, subtotal - discount, code],
+      `INSERT INTO orders (listing_id, buyer_id, seller_id, offer_id, quantity, unit_price_cents, discount_cents, total_cents, promo_code, delivery_method, shipping_cents, tax_cents, platform_fee_cents)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
+      [l.id, user.id, l.seller_id, offerId, qty, unit, discount, totalCents, code, deliveryMethod, shippingCents, taxCents, platformFeeCents],
       client
     );
     return getOrder(r!.id, client);
@@ -178,6 +193,12 @@ export async function transitionOrder(user: User, id: number, action: string): P
     if (action === "cancel" && o.status === "paid" && !roles.includes("seller")) allowed = false;
     if (!allowed) throw forbidden(`You cannot ${action} this order`);
     if (!t.from.includes(o.status)) throw conflict(`Cannot ${action} an order that is ${o.status}`);
+    // Stripe test mode: when configured, pay requires a succeeded charge first.
+    // Without a key, pay stays the mock flip. A missing/failed charge blocks.
+    if (action === "pay" && isStripeConfigured()) {
+      if (!o.stripe_payment_intent_id) throw conflict("Create a Stripe payment for this order first (POST /api/orders/[id]/payment-intent)");
+      if (!(await isPaymentIntentSucceeded(o.stripe_payment_intent_id))) throw conflict("Stripe payment has not succeeded yet — confirm the test card charge first");
+    }
     // Money must not move for a listing moderation removed: block pay/ship.
     // Confirm and cancel still work so in-flight orders can settle.
     if (action === "pay" || action === "ship") {

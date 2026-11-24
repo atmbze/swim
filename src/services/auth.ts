@@ -7,7 +7,7 @@ import { loginSchema, profileSchema, registerSchema } from "./validation";
 
 export const SESSION_TTL_SEC = 60 * 60 * 24 * 7;
 const COST = Number(process.env.BCRYPT_COST || 10);
-const PUBLIC_COLS = "id, email, name, city, zip, bio, role, banned, created_at";
+const PUBLIC_COLS = "id, email, name, city, zip, bio, role, banned, tier, created_at";
 const sha = (t: string) => crypto.createHash("sha256").update(t).digest("hex");
 
 export async function register(input: unknown): Promise<User> {
